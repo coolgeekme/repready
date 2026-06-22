@@ -1,0 +1,124 @@
+{
+  "app_name": "RepReady",
+  "theme": "light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "emotional_tone": "Confident, efficient, crisp, professional, highly functional.",
+  "typography": {
+    "fonts_installation": "Import 'Outfit' (weights 400, 600, 700) and 'IBM Plex Sans' (weights 400, 500, 600) from Google Fonts in the global CSS or HTML head.",
+    "headings": {
+      "family": "Outfit",
+      "weights": ["600", "700"],
+      "tracking": "tracking-tight",
+      "usage": "Use Outfit for all Headings (H1 to H4). Never use Inter, Roboto, or generic sans for headings."
+    },
+    "body": {
+      "family": "IBM Plex Sans",
+      "weights": ["400", "500", "600"],
+      "tracking": "tracking-normal",
+      "usage": "Use IBM Plex Sans for body text, form inputs, labels, and dense data points."
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl font-bold tracking-tighter leading-tight text-gray-900",
+      "h2": "text-2xl sm:text-3xl font-bold tracking-tight text-gray-900",
+      "h3": "text-xl sm:text-2xl font-semibold tracking-tight text-gray-900",
+      "h4": "text-lg sm:text-xl font-semibold text-gray-900",
+      "body": "text-base leading-relaxed text-gray-800",
+      "label_overline": "text-xs font-bold uppercase tracking-[0.2em] text-gray-500"
+    }
+  },
+  "colors": {
+    "background": "#FFFFFF",
+    "surface": "#F9FAFB",
+    "surface_alt": "#F3F4F6",
+    "primary_accent": "#0044FF",
+    "primary_accent_hover": "#0033CC",
+    "text_primary": "#111827",
+    "text_secondary": "#4B5563",
+    "borders": "#E5E7EB",
+    "status": {
+      "success": "#057A55",
+      "warning": "#FACA15",
+      "error": "#E02424"
+    },
+    "rules": [
+      "Use primary accent (#0044FF) strictly for primary CTAs and active states.",
+      "Never use muddy or low-contrast grays. Stick to the stark monochrome scale for structure.",
+      "Ensure text contrast meets APCA/WCAG AA standards at all times."
+    ]
+  },
+  "spacing_and_layout": {
+    "grid_system": "Control Room Grid (Dense, scannable)",
+    "mobile_grid": "grid-cols-2 gap-3 sm:gap-4",
+    "padding": "Generous internal padding (p-4 to p-6) within cards, tight gaps (gap-3 or gap-4) between them.",
+    "alignment": "Left-align dense text and forms. Center-alignment is strictly for empty states or minimal hero actions.",
+    "rules": [
+      "Mobile-first responsive design. The app must feel native on mobile web.",
+      "Limit max-height of any decorative images to 80vh.",
+      "Containers with borders must have internal padding to prevent text collision."
+    ]
+  },
+  "surfaces": {
+    "style": "Grid Borders / Technical Look",
+    "cards": "Flat background (bg-white or bg-gray-50), 1px solid border (border-gray-200), NO SHADOWS. Max border-radius: 4px (rounded-sm).",
+    "headers": "Crystal Glass: backdrop-blur-xl bg-white/80, 1px bottom border border-gray-200.",
+    "hover_state": "Slight lift (-translate-y-0.5), subtle ambient shadow (shadow-sm), border darkens to border-gray-300."
+  },
+  "components": {
+    "libraries": ["shadcn/ui", "lucide-react"],
+    "customizations": {
+      "buttons": "Square or slightly rounded (rounded-sm). High contrast background (bg-[#0044FF] text-white). Explicit hover: hover:bg-[#0033CC].",
+      "inputs": "Shadcn input, rounded-sm, pure white bg, 1px border. Focus state must use primary accent ring.",
+      "cards": "Cardless or flat technical borders. Strip out Shadcn's default thick borders or heavy shadows.",
+      "navigation": "Sticky bottom nav for mobile viewports, or minimal top header with a sleek hamburger menu."
+    }
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Use sharp, crisp icons. Keep them proportional to text (e.g., w-5 h-5 for body text)."
+  },
+  "motion": {
+    "transitions": "Fast, snappy, almost invisible interactions. transition-all duration-150 ease-out.",
+    "hover": "Explicit color changes and slight transforms.",
+    "rules": [
+      "Respect prefers-reduced-motion.",
+      "Add aria-hidden='true' to purely decorative animations."
+    ]
+  },
+  "image_urls": [
+    {
+      "category": "user_avatar_1",
+      "url": "https://images.pexels.com/photos/19746166/pexels-photo-19746166.jpeg",
+      "description": "Confident young man in business attire, suitable for user profile avatar."
+    },
+    {
+      "category": "user_avatar_2",
+      "url": "https://images.pexels.com/photos/37842959/pexels-photo-37842959.jpeg",
+      "description": "Smiling businessman in a blue suit."
+    },
+    {
+      "category": "empty_state_background",
+      "url": "https://images.unsplash.com/photo-1741806914412-340ca16e9175?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTF8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMG1pbmltYWwlMjB3aGl0ZXxlbnwwfHx8fDE3ODIxNTM4ODZ8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract white paper shapes, used as a subtle background for empty states or onboarding."
+    },
+    {
+      "category": "texture_pattern",
+      "url": "https://images.unsplash.com/photo-1532456745301-b2c645d8b80d",
+      "description": "White concrete building facade pattern, for technical Swiss-style texture overlays."
+    }
+  ],
+  "accessibility": {
+    "contrast": "Ensure minimum 4.5:1 for normal text.",
+    "focus": "All interactive elements must have a visible focus ring (focus:ring-2 focus:ring-[#0044FF] focus:outline-none focus:ring-offset-2).",
+    "testing": "All interactive and key informational elements MUST include a data-testid attribute (e.g., data-testid='generate-cold-email-btn', data-testid='user-profile-link')."
+  },
+  "instructions_to_main_agent": [
+    "Build a mobile-first web app mimicking a native Expo mobile experience. Ensure responsiveness up to desktop but prioritize mobile ergonomics.",
+    "Implement the 6 core features (Cold Email, Objection, Call Script, Intel, Re-Engagement, LinkedIn) accessible from a central 2-column 'Control Room' grid on the dashboard.",
+    "Use pure HTML/Tailwind for the grid layouts; do not over-abstract with Shadcn layout components unless necessary.",
+    "Use Shadcn components for interactive logic (forms, inputs, selects, dialogs), heavily customized with 'rounded-sm', sharp 1px borders, and the primary accent color #0044FF.",
+    "Apply 'data-testid' to ALL buttons, links, and forms for automated testing.",
+    "For the LinkedIn integration via Composio, build the generator UI and 'Post to LinkedIn' button. Mock the API flow visually.",
+    "Keep empty states functional and instructional. Treat empty spaces as structured moments rather than dead space.",
+    "Do NOT use 'Inter' for headings. Use 'Outfit' for headings and 'IBM Plex Sans' for body text. Enforce tracking-tight on headings."
+  ]
+}
