@@ -1,0 +1,36 @@
+{
+  "summary": "First iteration. Backend: 14/15 pytest passed (93%). All generators (cold-email, objection, call-script, company-intel, re-engagement, linkedin-post) return correct schemas, history auto-save + toggle save + delete work, profile excludes _id, X-User-Id auth enforced (401 when missing), Composio LinkedIn status returns {connected,connection_id}. One BACKEND BUG: /api/daily-prompt returns key 'focus_theme' instead of 'focus' because the daily_prompt endpoint builds its own user_msg and never embeds the JSON schema (unlike _generate). Claude consistently invents 'focus_theme' from the wording 'Output one sharp focus theme'. The Home screen reads daily.focus and displays an empty headline. Frontend: smoke flow end-to-end PASS — sign-up → home (greeting, tool grid 6 cards, daily-prompt card, history CTA) → cold-email generator returns 3 result cards with subject/body/copy → library tab shows the auto-saved item → settings tab shows role/industry chips, target audience, guidelines text + upload, LinkedIn connect, sign-out → sign-out returns to sign-in. testIDs are present on every interactive element.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/daily-prompt", "issue": "Returns 'focus_theme' instead of 'focus'. The endpoint builds user_msg without embedding the JSON schema (server.py lines 340-349), so the LLM does not follow the contract. Frontend (tabs)/index.tsx reads daily.focus → renders empty headline. Fix: include the schema string in user_msg, mirroring how _generate() works.", "priority": "HIGH"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Home daily-prompt card", "issue": "Focus headline appears empty after load because backend returns 'focus_theme' not 'focus' (see backend bug). Will resolve when backend is fixed.", "testID": "daily-prompt-card", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "expo packages version mismatch", "issue": "expo@54.0.34 (expected ~54.0.35), expo-font@14.0.11 (expected ~14.0.12), expo-router@6.0.23 (expected ~6.0.24). Warning shown by expo CLI; non-blocking but should be aligned via `npx expo install --check` or `yarn add` to expected versions."}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_repready_api.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix /api/daily-prompt: embed the JSON schema in user_msg (currently only system says 'strict JSON' but no key contract is sent) so the LLM returns 'focus' not 'focus_theme'. Simplest: append the schema (e.g., '\"focus\": \"string\", \"action_steps\": [..], \"quote\": \"string\"') to user_msg in server.py:340.",
+    "Align Expo package versions: run `npx expo install --check` and update expo, expo-font, expo-router to expected ~54.0.35 / ~14.0.12 / ~6.0.24."
+  ],
+  "critical_code_review_comments": [
+    "server.py daily_prompt() defines `schema` variable on line 340 but never includes it in user_msg — root cause of the focus/focus_theme drift.",
+    "api.ts: when fetch throws (e.g., 401), Home screen still calls api.getProfile()/api.dailyPrompt() on mount before AuthGate redirect lands — produces 401 console warnings on /(auth)/sign-in. Cosmetic.",
+    "linkedin connect endpoint does NOT save linkedin_connection_id (typo `connectedAccountId` vs Composio's actual attr) and never sets linkedin_connected=True until a successful post — status will always be {connected:false}. Acceptable for MVP since post path flips it; flag if you want a true connected state right after OAuth."
+  ],
+  "updated_files": ["/app/backend/tests/test_repready_api.py"],
+  "success_rate": {"backend": "93%", "frontend": "100% (smoke)"},
+  "seed_data_creation": "Created a fresh Firebase user tester+repready+<random>@example.com during the sign-up flow; auto-generated 1 cold-email history item under that uid. Backend tests run under a fresh be-test-<uuid> uid each session.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Main agent will likely fix daily-prompt schema inclusion. Re-run pytest backend/tests/test_repready_api.py::test_daily_prompt only to confirm 'focus' key returned. Then a quick UI revisit of Home daily-prompt card to confirm focus headline renders text. All other endpoints + flows already pass.",
+  "rca_of_issue": "Root cause of daily-prompt bug: server.py:340-349 defines `schema` but never passes it into user_msg. The system message only says 'reply with strict JSON only', and the prompt asks for 'one sharp focus theme', so Claude infers a JSON key named 'focus_theme'. The generator endpoints work because _generate() appends the schema to user_msg (server.py:194-201). Reproduction: `curl -H 'X-User-Id: x' https://rep-daily-ai.preview.emergentagent.com/api/daily-prompt` → returns `focus_theme`. Mitigation: include schema in user_msg of daily_prompt()."
+}
