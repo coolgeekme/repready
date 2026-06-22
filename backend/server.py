@@ -687,28 +687,48 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
             arguments=args,
             dangerously_skip_version_check=True,
         )
+
+    def _humanize_provider_error(raw: Any, platform: str) -> str:
+        s = str(raw or "")
+        # Composio sometimes forwards the provider's HTML error page verbatim.
+        if "<html" in s.lower() or "<!doctype" in s.lower():
+            if platform == "linkedin":
+                if "w_member_social" in s or "scope" in s.lower():
+                    return ("LinkedIn rejected the post: missing 'w_member_social' OAuth scope. "
+                            "In Composio dashboard → LinkedIn Auth Config, ensure 'Share on LinkedIn' "
+                            "product is approved and scope 'w_member_social' is requested, then reconnect.")
+                return ("LinkedIn rejected the post. Most likely the OAuth scope 'w_member_social' "
+                        "is missing from your Composio LinkedIn Auth Config. Reconnect after fixing.")
+            return f"{platform.capitalize()} rejected the request. Reconnect your account or check scopes."
+        # Truncate and strip
+        s = re.sub(r"\s+", " ", s).strip()
+        return s[:400]
+
     try:
         result = await asyncio.to_thread(_execute)
-        # Try to surface a useful success/error from the wrapped response
+        # Detect success/failure shape
         success = True
-        data: Any = result
+        err_payload: Any = None
         try:
             if hasattr(result, "successful"):
                 success = bool(result.successful)
+                err_payload = getattr(result, "error", None) or getattr(result, "data", None)
             elif isinstance(result, dict):
                 success = bool(result.get("successful", True))
-                data = result
+                err_payload = result.get("error") or result.get("data")
         except Exception:
             pass
         if not success:
-            err_msg = getattr(result, "error", None) or (isinstance(result, dict) and result.get("error")) or "Action failed"
-            raise HTTPException(status_code=502, detail=f"Composio {platform} action failed: {err_msg}")
-        return {"success": True, "platform": platform, "result": str(data)[:1000]}
+            msg = _humanize_provider_error(err_payload or result, platform)
+            logger.error(f"Composio {platform} post failed (provider): {str(err_payload)[:500]}")
+            raise HTTPException(status_code=502, detail=msg)
+        return {"success": True, "platform": platform, "result": str(result)[:600]}
     except HTTPException:
         raise
     except Exception as e:
+        clean = _humanize_provider_error(e, platform)
         logger.error(f"Composio {platform} post failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+        raise HTTPException(status_code=502, detail=clean)
 
 
 # --- Legacy LinkedIn-specific endpoints (kept for the post button on result cards) ---
