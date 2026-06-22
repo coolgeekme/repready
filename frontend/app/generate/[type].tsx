@@ -31,7 +31,7 @@ export default function GenerateScreen() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [posting, setPosting] = useState<number | null>(null);
+  const [posting, setPosting] = useState<string | null>(null);
   const [imageMap, setImageMap] = useState<Record<number, { uri: string; loading?: boolean; error?: string }>>({});
 
   useEffect(() => {
@@ -69,15 +69,29 @@ export default function GenerateScreen() {
     setTimeout(() => setToast(null), 1200);
   };
 
-  const postToLinkedIn = async (idx: number, content: string) => {
-    setPosting(idx);
+  const postToSocial = async (platform: "linkedin" | "facebook" | "instagram", idx: number, content: string) => {
+    const key = `${platform}-${idx}`;
+    setPosting(key);
     setErr(null);
     try {
-      await api.linkedinPost(content);
-      setToast("Posted to LinkedIn");
-      setTimeout(() => setToast(null), 1500);
+      const image = imageMap[idx];
+      const imageUrl = image?.uri;
+      if (platform === "instagram" && !imageUrl) {
+        setErr("Instagram needs an image. Tap \"Generate image\" first.");
+        return;
+      }
+      await api.socialPost(platform, content, imageUrl);
+      setToast(`Posted to ${platform.charAt(0).toUpperCase() + platform.slice(1)} ✓`);
+      setTimeout(() => setToast(null), 1800);
     } catch (e: any) {
-      setErr("Couldn't post. Connect LinkedIn in Settings first.");
+      const m = e?.message || "";
+      if (m.includes("ConnectedAccountNotFound") || m.includes("No connected account")) {
+        setErr(`Connect ${platform} in Settings first.`);
+      } else if (m.includes("Image data URLs")) {
+        setErr(`${platform} needs a public image URL — base64 isn't supported by the platform yet.`);
+      } else {
+        setErr(`Couldn't post to ${platform}. ${m.slice(0, 160)}`);
+      }
     } finally {
       setPosting(null);
     }
@@ -149,7 +163,7 @@ export default function GenerateScreen() {
               t,
               output,
               copy,
-              meta.canPostLinkedIn ? postToLinkedIn : undefined,
+              meta.canPostLinkedIn ? postToSocial : undefined,
               posting,
               meta.canPostLinkedIn ? generateImage : undefined,
               imageMap,
@@ -210,8 +224,8 @@ function renderOutput(
   t: GenType,
   out: any,
   onCopy: (s: string) => void,
-  onPost?: (idx: number, content: string) => void,
-  postingIdx?: number | null,
+  onPost?: (platform: "linkedin" | "facebook" | "instagram", idx: number, content: string) => void,
+  postingKey?: string | null,
   onGenerateImage?: (idx: number, hook: string, body: string) => void,
   imageMap?: Record<number, { uri: string; loading?: boolean; error?: string }>,
 ) {
@@ -292,29 +306,33 @@ function renderOutput(
     return (out.variations || []).map((v: any, i: number) => {
       const full = `${v.hook}\n\n${v.body}\n\n${(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}`;
       const img = imageMap?.[i];
+      const renderPlatformBtn = (platform: "linkedin" | "facebook" | "instagram", icon: keyof typeof Ionicons.glyphMap, color: string, label: string) => {
+        const key = `${platform}-${i}`;
+        const isBusy = postingKey === key;
+        const disabledForInsta = platform === "instagram" && !img?.uri;
+        return (
+          <TouchableOpacity
+            key={platform}
+            testID={`${platform}-post-${i}`}
+            style={[styles.platformBtn, { backgroundColor: color }, disabledForInsta && { opacity: 0.5 }]}
+            onPress={() => onPost?.(platform, i, full)}
+            disabled={isBusy || disabledForInsta}
+          >
+            {isBusy ? <ActivityIndicator color="#fff" size="small" /> : (
+              <>
+                <Ionicons name={icon} size={14} color="#fff" />
+                <Text style={styles.platformBtnText}>{label}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        );
+      };
       return (
         <ResultCard
           key={i}
           index={i + 1}
           tag="Post"
           onCopy={() => onCopy(full)}
-          rightAction={
-            onPost ? (
-              <TouchableOpacity
-                testID={`linkedin-post-${i}`}
-                style={styles.smallBtn}
-                onPress={() => onPost(i, full)}
-                disabled={postingIdx === i}
-              >
-                {postingIdx === i ? <ActivityIndicator color="#fff" size="small" /> : (
-                  <>
-                    <Ionicons name="logo-linkedin" size={14} color="#fff" />
-                    <Text style={styles.smallBtnText}>Post</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            ) : undefined
-          }
         >
           <Text style={styles.hook}>{v.hook}</Text>
           <Text style={styles.body}>{v.body}</Text>
@@ -352,6 +370,18 @@ function renderOutput(
           ) : null}
 
           {img?.error && <Text style={styles.error}>{img.error}</Text>}
+
+          {/* Platform post buttons */}
+          {onPost && (
+            <View style={styles.platformRow}>
+              {renderPlatformBtn("linkedin", "logo-linkedin", "#0A66C2", "LinkedIn")}
+              {renderPlatformBtn("facebook", "logo-facebook", "#1877F2", "Facebook")}
+              {renderPlatformBtn("instagram", "logo-instagram", "#E1306C", "Instagram")}
+            </View>
+          )}
+          {onPost && !img?.uri && (
+            <Text style={styles.platformHint}>Instagram requires an image — tap &quot;Generate image&quot;.</Text>
+          )}
         </ResultCard>
       );
     });
@@ -419,6 +449,11 @@ const styles = StyleSheet.create({
 
   smallBtn: { backgroundColor: "#0A66C2", paddingHorizontal: 10, paddingVertical: 6, borderRadius: radii.sm, flexDirection: "row", alignItems: "center", gap: 4, marginLeft: 6 },
   smallBtnText: { color: "#fff", fontWeight: "700", fontSize: 12 },
+
+  platformRow: { flexDirection: "row", gap: 6, marginTop: 12 },
+  platformBtn: { flex: 1, paddingVertical: 10, borderRadius: radii.sm, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 36 },
+  platformBtnText: { color: "#fff", fontWeight: "700", fontSize: 12 },
+  platformHint: { color: colors.textSubtle, fontSize: 11, marginTop: 6, textAlign: "center" },
 
   imageBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, paddingVertical: 12, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, borderStyle: "dashed", backgroundColor: colors.surface },
   imageBtnText: { color: colors.text, fontWeight: "600", flex: 1 },

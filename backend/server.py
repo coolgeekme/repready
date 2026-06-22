@@ -567,6 +567,25 @@ async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_
     }
 
 
+SOCIAL_POST_TOOLS: Dict[str, Dict[str, Any]] = {
+    "linkedin": {
+        "slug": "LINKEDIN_CREATE_LINKED_IN_POST",
+        "build_args": lambda content, image_url=None: {"text": content},
+        "needs_image": False,
+    },
+    "facebook": {
+        "slug": "FACEBOOK_CREATE_POST",
+        "build_args": lambda content, image_url=None: {"text": content},
+        "needs_image": False,
+    },
+    "instagram": {
+        "slug": "INSTAGRAM_CREATE_POST",
+        "build_args": lambda content, image_url=None: {"caption": content, "image_url": image_url or ""},
+        "needs_image": True,
+    },
+}
+
+
 # ---------- Routes: Composio Social (LinkedIn / Facebook / Instagram) ----------
 def _composio_client():
     from composio import Composio
@@ -643,6 +662,55 @@ async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
         raise HTTPException(status_code=502, detail=f"Composio error: {e}")
 
 
+@api_router.post("/social/{platform}/post")
+async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
+    if platform not in SOCIAL_POST_TOOLS:
+        raise HTTPException(status_code=404, detail="Unknown platform")
+    _require_social_config(platform)
+    content = (payload.get("content") or "").strip()
+    image_url = (payload.get("image_url") or "").strip() or None
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    tool = SOCIAL_POST_TOOLS[platform]
+    if tool["needs_image"] and not image_url:
+        raise HTTPException(status_code=400, detail=f"{platform} requires an image_url")
+
+    args = tool["build_args"](content, image_url)
+    slug = tool["slug"]
+    import asyncio
+    def _execute():
+        client = _composio_client()
+        return client.tools.execute(
+            user_id=user_id,
+            slug=slug,
+            arguments=args,
+            dangerously_skip_version_check=True,
+        )
+    try:
+        result = await asyncio.to_thread(_execute)
+        # Try to surface a useful success/error from the wrapped response
+        success = True
+        data: Any = result
+        try:
+            if hasattr(result, "successful"):
+                success = bool(result.successful)
+            elif isinstance(result, dict):
+                success = bool(result.get("successful", True))
+                data = result
+        except Exception:
+            pass
+        if not success:
+            err_msg = getattr(result, "error", None) or (isinstance(result, dict) and result.get("error")) or "Action failed"
+            raise HTTPException(status_code=502, detail=f"Composio {platform} action failed: {err_msg}")
+        return {"success": True, "platform": platform, "result": str(data)[:1000]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Composio {platform} post failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+
+
 # --- Legacy LinkedIn-specific endpoints (kept for the post button on result cards) ---
 @api_router.get("/composio/linkedin/status")
 async def linkedin_status_legacy(user_id: str = Depends(get_user_id)):
@@ -667,6 +735,7 @@ async def linkedin_post(payload: Dict[str, Any], user_id: str = Depends(get_user
             user_id=user_id,
             slug="LINKEDIN_CREATE_LINKED_IN_POST",
             arguments={"text": content},
+            dangerously_skip_version_check=True,
         )
     try:
         result = await asyncio.to_thread(_execute)
