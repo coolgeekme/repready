@@ -345,7 +345,8 @@ async def daily_prompt(user_id: str = Depends(get_user_id)):
     user_msg = (
         f"Today: {today}. Rep profile: role={profile.get('role') or 'AE'}, "
         f"industry={profile.get('industry') or 'SaaS'}. "
-        "Output one sharp focus theme (max 12 words), 3 micro action steps (max 10 words each), and a short relevant quote."
+        "Output one sharp focus theme (max 12 words), 3 micro action steps (max 10 words each), and a short relevant quote.\n\n"
+        f"Return strictly this JSON schema (no explanations, no markdown):\n{schema}"
     )
     data = await _llm_generate_json(system, user_msg)
     return {"date": today, **data}
