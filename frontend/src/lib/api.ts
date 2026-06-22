@@ -53,4 +53,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content }),
     }),
+
+  // Image generation
+  generatePostImage: (body: { hook?: string; body?: string; prompt?: string }) =>
+    request<any>("/generate/post-image", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

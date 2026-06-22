@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: F401
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -100,19 +100,66 @@ async def _get_profile(user_id: str) -> Dict[str, Any]:
 
 
 def _extract_json(text: str) -> Any:
-    """Extract a JSON object/array from an LLM response."""
-    text = text.strip()
+    """Extract a JSON object/array from an LLM response.
+    Tries straight parse, then with code-fence stripping, then a best-effort
+    repair for the common case of unescaped double quotes inside string values.
+    """
+    raw = text.strip()
     # Strip code fences
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
-        return json.loads(text)
+        return json.loads(cleaned)
     except Exception:
-        # Find the first { or [
-        match = re.search(r"(\{.*\}|\[.*\])", text, re.S)
-        if match:
-            return json.loads(match.group(1))
-        raise
+        pass
+    # Locate the JSON block
+    match = re.search(r"(\{.*\}|\[.*\])", cleaned, re.S)
+    block = match.group(1) if match else cleaned
+    try:
+        return json.loads(block)
+    except Exception:
+        pass
+    # Best-effort repair: replace inner unescaped double quotes inside string
+    # values with curly quotes. We walk character by character respecting
+    # backslash escapes and brace/array nesting.
+    repaired_chars: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(block)
+    while i < n:
+        ch = block[i]
+        if escape:
+            repaired_chars.append(ch)
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            repaired_chars.append(ch)
+            escape = True
+            i += 1
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                repaired_chars.append(ch)
+            else:
+                # Look ahead: if next non-space char is one of `,:}]` or end,
+                # this is the real closing quote. Otherwise treat as inner quote.
+                j = i + 1
+                while j < n and block[j] in " \t\r\n":
+                    j += 1
+                if j >= n or block[j] in ",:}]":
+                    in_string = False
+                    repaired_chars.append(ch)
+                else:
+                    repaired_chars.append("\u201d")
+            i += 1
+            continue
+        repaired_chars.append(ch)
+        i += 1
+    repaired = "".join(repaired_chars)
+    return json.loads(repaired)
 
 
 async def _llm_generate_json(system_msg: str, user_msg: str) -> Any:
@@ -120,7 +167,7 @@ async def _llm_generate_json(system_msg: str, user_msg: str) -> Any:
         api_key=EMERGENT_LLM_KEY,
         session_id=f"repready-{uuid.uuid4()}",
         system_message=system_msg,
-    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=2000)
+    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=3500)
 
     response = await chat.send_message(UserMessage(text=user_msg))
     try:
@@ -189,7 +236,9 @@ async def _generate(user_id: str, type_: str, schema_hint: str, prompt: str, req
     system = (
         "You are RepReady, an elite sales enablement assistant. You craft concise, "
         "high-conversion, human-sounding sales content. Avoid clichés, avoid hype. "
-        "Always reply with strict, valid JSON only — no prose, no markdown fences."
+        "Always reply with strict, valid JSON only — no prose, no markdown fences. "
+        "CRITICAL: When string values contain quotes, use single quotes (') or curly quotes "
+        "(' ' \u201c \u201d) — never raw unescaped double quotes inside string values."
     )
     user_msg = f"""Sales rep context:
 {context}
@@ -350,6 +399,54 @@ async def daily_prompt(user_id: str = Depends(get_user_id)):
     )
     data = await _llm_generate_json(system, user_msg)
     return {"date": today, **data}
+
+
+# ---------- Routes: Image generation (Gemini Nano Banana) ----------
+class ImageRequest(BaseModel):
+    hook: Optional[str] = None
+    body: Optional[str] = None
+    prompt: Optional[str] = None  # explicit override
+    style: Optional[str] = None  # e.g., "minimal flat illustration"
+
+
+@api_router.post("/generate/post-image")
+async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_user_id)):
+    profile = await _get_profile(user_id)
+    industry = profile.get("industry") or "business"
+    style = payload.style or "modern editorial photo, soft natural light, shallow depth of field, professional, high contrast"
+
+    if payload.prompt:
+        image_prompt = payload.prompt
+    else:
+        seed = f"{payload.hook or ''}. {payload.body or ''}".strip()[:600]
+        image_prompt = (
+            f"A scroll-stopping LinkedIn post hero image for a {industry} professional. "
+            f"Concept: {seed}. "
+            f"Style: {style}. No on-image text or watermarks. "
+            "Square 1:1 aspect ratio, social-media optimized."
+        )
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"repready-img-{uuid.uuid4()}",
+        system_message="You generate a single high-quality social media image based on the user's brief.",
+    ).with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
+
+    try:
+        _, images = await chat.send_message_multimodal_response(UserMessage(text=image_prompt))
+    except Exception as e:
+        logger.error(f"Image gen failed: {e}")
+        raise HTTPException(status_code=502, detail="Image generation failed")
+
+    if not images:
+        raise HTTPException(status_code=502, detail="No image returned")
+
+    img = images[0]
+    return {
+        "mime_type": img.get("mime_type", "image/png"),
+        "data": img.get("data"),  # base64 string
+        "prompt": image_prompt,
+    }
 
 
 # ---------- Routes: Composio LinkedIn ----------

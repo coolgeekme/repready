@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator } from "react-native";
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Image } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -32,6 +32,7 @@ export default function GenerateScreen() {
   const [err, setErr] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [posting, setPosting] = useState<number | null>(null);
+  const [imageMap, setImageMap] = useState<Record<number, { uri: string; loading?: boolean; error?: string }>>({});
 
   useEffect(() => {
     if (historyId) {
@@ -79,6 +80,17 @@ export default function GenerateScreen() {
       setErr("Couldn't post. Connect LinkedIn in Settings first.");
     } finally {
       setPosting(null);
+    }
+  };
+
+  const generateImage = async (idx: number, hook: string, body: string) => {
+    setImageMap((m) => ({ ...m, [idx]: { uri: "", loading: true } }));
+    try {
+      const res = await api.generatePostImage({ hook, body });
+      const uri = `data:${res.mime_type || "image/png"};base64,${res.data}`;
+      setImageMap((m) => ({ ...m, [idx]: { uri, loading: false } }));
+    } catch (e: any) {
+      setImageMap((m) => ({ ...m, [idx]: { uri: "", loading: false, error: "Image generation failed" } }));
     }
   };
 
@@ -133,7 +145,15 @@ export default function GenerateScreen() {
         {output && (
           <View style={{ marginTop: spacing.lg, gap: 12 }}>
             <Text style={styles.sectionLabel}>Results</Text>
-            {renderOutput(t, output, copy, meta.canPostLinkedIn ? postToLinkedIn : undefined, posting)}
+            {renderOutput(
+              t,
+              output,
+              copy,
+              meta.canPostLinkedIn ? postToLinkedIn : undefined,
+              posting,
+              meta.canPostLinkedIn ? generateImage : undefined,
+              imageMap,
+            )}
           </View>
         )}
       </KeyboardAwareScrollView>
@@ -192,6 +212,8 @@ function renderOutput(
   onCopy: (s: string) => void,
   onPost?: (idx: number, content: string) => void,
   postingIdx?: number | null,
+  onGenerateImage?: (idx: number, hook: string, body: string) => void,
+  imageMap?: Record<number, { uri: string; loading?: boolean; error?: string }>,
 ) {
   if (t === "cold-email") {
     return (out.variations || []).map((v: any, i: number) => (
@@ -269,6 +291,7 @@ function renderOutput(
   if (t === "linkedin-post") {
     return (out.variations || []).map((v: any, i: number) => {
       const full = `${v.hook}\n\n${v.body}\n\n${(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}`;
+      const img = imageMap?.[i];
       return (
         <ResultCard
           key={i}
@@ -296,6 +319,39 @@ function renderOutput(
           <Text style={styles.hook}>{v.hook}</Text>
           <Text style={styles.body}>{v.body}</Text>
           <Text style={styles.tags}>{(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}</Text>
+
+          {/* Image area */}
+          {img?.uri ? (
+            <View style={styles.imageWrap}>
+              <Image testID={`post-image-${i}`} source={{ uri: img.uri }} style={styles.postImage} resizeMode="cover" />
+              <TouchableOpacity
+                testID={`regenerate-image-${i}`}
+                style={styles.regenImageBtn}
+                onPress={() => onGenerateImage?.(i, v.hook, v.body)}
+                disabled={img.loading}
+              >
+                <Ionicons name="refresh" size={14} color="#fff" />
+                <Text style={styles.regenImageText}>Regenerate</Text>
+              </TouchableOpacity>
+            </View>
+          ) : img?.loading ? (
+            <View style={[styles.imageWrap, styles.imageLoading]}>
+              <ActivityIndicator color={colors.primary} />
+              <Text style={styles.imageLoadingText}>Painting your image…</Text>
+            </View>
+          ) : onGenerateImage ? (
+            <TouchableOpacity
+              testID={`generate-image-${i}`}
+              style={styles.imageBtn}
+              onPress={() => onGenerateImage(i, v.hook, v.body)}
+            >
+              <Ionicons name="image-outline" size={16} color={colors.text} />
+              <Text style={styles.imageBtnText}>Generate image</Text>
+              <View style={styles.aiPill}><Text style={styles.aiPillText}>AI</Text></View>
+            </TouchableOpacity>
+          ) : null}
+
+          {img?.error && <Text style={styles.error}>{img.error}</Text>}
         </ResultCard>
       );
     });
@@ -363,6 +419,17 @@ const styles = StyleSheet.create({
 
   smallBtn: { backgroundColor: "#0A66C2", paddingHorizontal: 10, paddingVertical: 6, borderRadius: radii.sm, flexDirection: "row", alignItems: "center", gap: 4, marginLeft: 6 },
   smallBtnText: { color: "#fff", fontWeight: "700", fontSize: 12 },
+
+  imageBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, paddingVertical: 12, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, borderStyle: "dashed", backgroundColor: colors.surface },
+  imageBtnText: { color: colors.text, fontWeight: "600", flex: 1 },
+  aiPill: { backgroundColor: colors.primary, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
+  aiPillText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 1 },
+  imageWrap: { marginTop: 12, borderRadius: radii.sm, overflow: "hidden", borderWidth: 1, borderColor: colors.border, position: "relative" },
+  postImage: { width: "100%", aspectRatio: 1, backgroundColor: colors.surfaceAlt },
+  imageLoading: { aspectRatio: 1, alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: colors.surface },
+  imageLoadingText: { color: colors.textMuted, fontSize: 12 },
+  regenImageBtn: { position: "absolute", bottom: 8, right: 8, backgroundColor: "rgba(11,11,15,0.85)", paddingHorizontal: 10, paddingVertical: 6, borderRadius: radii.sm, flexDirection: "row", alignItems: "center", gap: 4 },
+  regenImageText: { color: "#fff", fontSize: 11, fontWeight: "700" },
 
   error: { color: colors.error, fontSize: 13, marginBottom: 8 },
   toast: { position: "absolute", left: 0, right: 0, alignItems: "center" },
