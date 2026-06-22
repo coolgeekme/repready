@@ -20,6 +20,7 @@ export default function Settings() {
   const [toast, setToast] = useState<string | null>(null);
   const [linkedIn, setLinkedIn] = useState<{ connected: boolean }>({ connected: false });
   const [connecting, setConnecting] = useState(false);
+  const [autoFilling, setAutoFilling] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -84,6 +85,33 @@ export default function Settings() {
       setTimeout(() => setToast(null), 1500);
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const autofillCompany = async () => {
+    if (!profile.company_name?.trim()) {
+      setToast("Enter company name first");
+      setTimeout(() => setToast(null), 1500);
+      return;
+    }
+    setAutoFilling(true);
+    try {
+      const res = await api.companyAutofill(profile.company_name.trim(), profile.company_website);
+      const patch = {
+        company_offerings: res.company_offerings || profile.company_offerings,
+        company_value_props: res.company_value_props || profile.company_value_props,
+        industry: res.industry || profile.industry,
+        target_audience: res.target_audience || profile.target_audience,
+      };
+      setProfile({ ...profile, ...patch });
+      await api.updateProfile(patch);
+      setToast(res.fetched_site ? "Auto-filled from site" : "Auto-filled (no site reached)");
+      setTimeout(() => setToast(null), 1800);
+    } catch (e: any) {
+      setToast("Auto-fill failed");
+      setTimeout(() => setToast(null), 1500);
+    } finally {
+      setAutoFilling(false);
     }
   };
 
@@ -162,7 +190,7 @@ export default function Settings() {
           placeholderTextColor={colors.textSubtle}
         />
 
-        <Text style={styles.sectionLabel}>Website (optional)</Text>
+        <Text style={styles.sectionLabel}>Website (optional, recommended)</Text>
         <TextInput
           testID="settings-company-website"
           style={styles.input}
@@ -174,6 +202,31 @@ export default function Settings() {
           autoCapitalize="none"
           keyboardType="url"
         />
+
+        {/* AI Autofill */}
+        <TouchableOpacity
+          testID="settings-company-autofill"
+          style={[styles.autofillBtn, (!profile.company_name?.trim() || autoFilling) && styles.autofillBtnDisabled]}
+          onPress={autofillCompany}
+          disabled={!profile.company_name?.trim() || autoFilling}
+          activeOpacity={0.85}
+        >
+          {autoFilling ? (
+            <>
+              <ActivityIndicator color="#fff" />
+              <Text style={styles.autofillText}>Researching {profile.company_name || "company"}…</Text>
+            </>
+          ) : (
+            <>
+              <Ionicons name="sparkles" size={16} color="#fff" />
+              <Text style={styles.autofillText}>Auto-fill with AI</Text>
+              <View style={styles.aiBadge}><Text style={styles.aiBadgeText}>AI</Text></View>
+            </>
+          )}
+        </TouchableOpacity>
+        <Text style={styles.autofillHelper}>
+          Reads your website and fills offerings, value props, industry, and ICP. Edit anything below before relying on it.
+        </Text>
 
         <Text style={styles.sectionLabel}>What does your company sell?</Text>
         <TextInput
@@ -276,6 +329,13 @@ const styles = StyleSheet.create({
   sectionHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: spacing.xl, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
   sectionHeaderText: { fontSize: 18, fontWeight: "800", color: colors.text, letterSpacing: -0.4 },
   helper: { color: colors.textMuted, fontSize: 13, marginTop: 8, lineHeight: 19 },
+
+  autofillBtn: { backgroundColor: colors.text, paddingVertical: 14, paddingHorizontal: 16, borderRadius: radii.sm, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: spacing.md },
+  autofillBtnDisabled: { opacity: 0.5 },
+  autofillText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  aiBadge: { backgroundColor: colors.primary, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, marginLeft: 4 },
+  aiBadgeText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 1 },
+  autofillHelper: { color: colors.textMuted, fontSize: 12, marginTop: 6, lineHeight: 17 },
 
   chipsRow: { gap: 8, paddingRight: spacing.md },
   chip: { paddingHorizontal: 14, height: 36, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center", flexShrink: 0 },

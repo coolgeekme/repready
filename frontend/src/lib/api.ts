@@ -60,4 +60,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  // Company autofill
+  companyAutofill: (company_name: string, company_website?: string) =>
+    request<any>("/company/autofill", {
+      method: "POST",
+      body: JSON.stringify({ company_name, company_website }),
+    }),
 };

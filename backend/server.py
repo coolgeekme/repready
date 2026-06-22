@@ -13,6 +13,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: F401
+import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -421,6 +422,95 @@ async def daily_prompt(user_id: str = Depends(get_user_id)):
     )
     data = await _llm_generate_json(system, user_msg)
     return {"date": today, **data}
+
+
+# ---------- Routes: Company autofill ----------
+class CompanyAutofillRequest(BaseModel):
+    company_name: str
+    company_website: Optional[str] = None
+
+
+def _normalize_url(url: str) -> str:
+    url = url.strip()
+    if not url:
+        return ""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
+async def _fetch_site_text(url: str) -> str:
+    """Fetch a URL and return cleaned visible text (up to ~6000 chars)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; RepReadyBot/1.0; +https://repready.app)",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, headers=headers) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        html = resp.text
+    # Strip script/style/nav/footer blocks, then tags
+    html = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    html = re.sub(r"<!--.*?-->", " ", html, flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"&nbsp;|&#160;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    text = re.sub(r"&quot;", '"', text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:6000]
+
+
+@api_router.post("/company/autofill")
+async def company_autofill(payload: CompanyAutofillRequest, user_id: str = Depends(get_user_id)):
+    name = payload.company_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="company_name is required")
+
+    site_text = ""
+    site_error: Optional[str] = None
+    if payload.company_website:
+        try:
+            site_text = await _fetch_site_text(_normalize_url(payload.company_website))
+        except Exception as e:
+            site_error = f"Could not fetch site: {type(e).__name__}"
+            logger.warning(f"Autofill fetch failed for {payload.company_website}: {e}")
+
+    schema = '''{
+  "company_offerings": "string (2-4 sentences plain text)",
+  "company_value_props": "string (3-5 dashed bullet lines separated by \\n)",
+  "industry": "string (one of: SaaS, FinTech, Healthcare, Manufacturing, Education, E-commerce, Real Estate, Marketing, or a short custom label)",
+  "target_audience": "string (one-line ICP, e.g., 'VPs of Engineering at mid-market SaaS')",
+  "source_confidence": "string (high|medium|low)"
+}'''
+
+    system = (
+        "You are RepReady, a B2B sales research assistant. Build a clean sales-ready "
+        "company brief from the inputs. Use ONLY information evidenced by the website "
+        "text when provided. If a field is uncertain or the site is missing, mark "
+        "source_confidence as 'low' and produce a plausible best-effort guess based "
+        "on the company name. Never fabricate specific numbers, customer logos, or "
+        "compliance certifications. Reply with strict JSON only, no markdown."
+    )
+
+    user_msg_parts = [f"Company name: {name}"]
+    if payload.company_website:
+        user_msg_parts.append(f"Website: {payload.company_website}")
+    if site_text:
+        user_msg_parts.append(f"\nWebsite text (cleaned, truncated):\n{site_text}")
+    elif site_error:
+        user_msg_parts.append(f"\n(Note: {site_error}. Use only the company name.)")
+    user_msg_parts.append(f"\nReturn strictly this JSON schema (no explanations):\n{schema}")
+
+    data = await _llm_generate_json(system, "\n".join(user_msg_parts))
+    return {
+        "company_name": name,
+        "company_website": payload.company_website or "",
+        "fetched_site": bool(site_text),
+        "site_error": site_error,
+        **data,
+    }
 
 
 # ---------- Routes: Image generation (Gemini Nano Banana) ----------
