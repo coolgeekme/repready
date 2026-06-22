@@ -44,7 +44,7 @@ export const api = {
   deleteHistory: (id: string) =>
     request<any>(`/history/${id}`, { method: "DELETE" }),
 
-  // Composio LinkedIn
+  // Composio LinkedIn (legacy alias of social/linkedin/* — kept for the result-card Post button)
   linkedinStatus: () => request<any>("/composio/linkedin/status"),
   linkedinConnect: () =>
     request<any>("/composio/linkedin/connect", { method: "POST" }),
@@ -53,6 +53,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content }),
     }),
+
+  // Generic social (LinkedIn / Facebook / Instagram)
+  socialStatus: (platform: string) =>
+    request<any>(`/social/${platform}/status`),
+  socialConnect: (platform: string) =>
+    request<any>(`/social/${platform}/connect`, { method: "POST" }),
 
   // Image generation
   generatePostImage: (body: { hook?: string; body?: string; prompt?: string }) =>

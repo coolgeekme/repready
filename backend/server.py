@@ -25,7 +25,12 @@ db = client[os.environ["DB_NAME"]]
 
 EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
 COMPOSIO_API_KEY = os.environ["COMPOSIO_API_KEY"]
-LINKEDIN_AUTH_CONFIG_ID = os.environ.get("LINKEDIN_AUTH_CONFIG_ID", "").strip()
+SOCIAL_AUTH_CONFIGS: Dict[str, str] = {
+    "linkedin": os.environ.get("LINKEDIN_AUTH_CONFIG_ID", "").strip(),
+    "facebook": os.environ.get("FACEBOOK_AUTH_CONFIG_ID", "").strip(),
+    "instagram": os.environ.get("INSTAGRAM_AUTH_CONFIG_ID", "").strip(),
+}
+LINKEDIN_AUTH_CONFIG_ID = SOCIAL_AUTH_CONFIGS["linkedin"]
 CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
 
 app = FastAPI(title="RepReady API")
@@ -562,65 +567,59 @@ async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_
     }
 
 
-# ---------- Routes: Composio LinkedIn ----------
+# ---------- Routes: Composio Social (LinkedIn / Facebook / Instagram) ----------
 def _composio_client():
     from composio import Composio
     return Composio(api_key=COMPOSIO_API_KEY)
 
 
-def _require_auth_config() -> str:
-    if not LINKEDIN_AUTH_CONFIG_ID:
+def _require_social_config(platform: str) -> str:
+    auth_config_id = SOCIAL_AUTH_CONFIGS.get(platform, "")
+    if not auth_config_id:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "LinkedIn is not configured yet. The Composio dashboard needs a "
-                "LinkedIn Auth Config (Toolkits → LinkedIn → Connect). Add the "
-                "resulting Auth Config ID (ac_...) to LINKEDIN_AUTH_CONFIG_ID."
-            ),
+            detail=f"{platform.capitalize()} is not configured. Set {platform.upper()}_AUTH_CONFIG_ID.",
         )
-    return LINKEDIN_AUTH_CONFIG_ID
+    return auth_config_id
 
 
-@api_router.get("/composio/linkedin/status")
-async def linkedin_status(user_id: str = Depends(get_user_id)):
-    profile = await _get_profile(user_id)
-    if not LINKEDIN_AUTH_CONFIG_ID:
-        return {
-            "connected": False,
-            "configured": False,
-            "message": "LinkedIn integration not configured in Composio dashboard yet.",
-        }
+@api_router.get("/social/{platform}/status")
+async def social_status(platform: str, user_id: str = Depends(get_user_id)):
+    if platform not in SOCIAL_AUTH_CONFIGS:
+        raise HTTPException(status_code=404, detail="Unknown platform")
+    auth_config_id = SOCIAL_AUTH_CONFIGS[platform]
+    if not auth_config_id:
+        return {"platform": platform, "connected": False, "configured": False}
 
     import asyncio
     def _list():
         client = _composio_client()
         return client.connected_accounts.list(
             user_ids=[user_id],
-            auth_config_ids=[LINKEDIN_AUTH_CONFIG_ID],
+            auth_config_ids=[auth_config_id],
             statuses=["ACTIVE"],
         )
     try:
         result = await asyncio.to_thread(_list)
         items = getattr(result, "items", None) or list(result or [])
         connected = len(items) > 0
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"linkedin_connected": connected, "user_id": user_id}},
-            upsert=True,
-        )
         return {
+            "platform": platform,
             "connected": connected,
             "configured": True,
-            "connection_id": getattr(items[0], "id", None) if connected else profile.get("linkedin_connection_id"),
+            "connection_id": getattr(items[0], "id", None) if connected else None,
         }
     except Exception as e:
-        logger.warning(f"LinkedIn status check failed: {e}")
-        return {"connected": bool(profile.get("linkedin_connected")), "configured": True, "error": str(e)}
+        logger.warning(f"{platform} status check failed: {e}")
+        return {"platform": platform, "connected": False, "configured": True, "error": str(e)}
 
 
-@api_router.post("/composio/linkedin/connect")
-async def linkedin_connect(user_id: str = Depends(get_user_id)):
-    auth_config_id = _require_auth_config()
+@api_router.post("/social/{platform}/connect")
+async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
+    if platform not in SOCIAL_AUTH_CONFIGS:
+        raise HTTPException(status_code=404, detail="Unknown platform")
+    auth_config_id = _require_social_config(platform)
+
     import asyncio
     def _link():
         client = _composio_client()
@@ -633,30 +632,31 @@ async def linkedin_connect(user_id: str = Depends(get_user_id)):
         redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
         if not redirect_url:
             raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "user_id": user_id,
-                "linkedin_connection_id": getattr(cr, "id", None) or getattr(cr, "connected_account_id", None),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }},
-            upsert=True,
-        )
-        return {"redirect_url": redirect_url}
+        return {"platform": platform, "redirect_url": redirect_url}
     except HTTPException:
         raise
     except Exception as e:
         msg = str(e)
-        if "ComposioMultipleConnectedAccountsError" in msg or "already has" in msg.lower():
-            # User already connected — return a marker the FE can interpret
-            return {"redirect_url": None, "already_connected": True}
-        logger.error(f"Composio LinkedIn connect failed: {e}")
+        if "ComposioMultipleConnectedAccountsError" in msg or "already" in msg.lower():
+            return {"platform": platform, "redirect_url": None, "already_connected": True}
+        logger.error(f"Composio {platform} connect failed: {e}")
         raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+
+
+# --- Legacy LinkedIn-specific endpoints (kept for the post button on result cards) ---
+@api_router.get("/composio/linkedin/status")
+async def linkedin_status_legacy(user_id: str = Depends(get_user_id)):
+    return await social_status("linkedin", user_id)
+
+
+@api_router.post("/composio/linkedin/connect")
+async def linkedin_connect_legacy(user_id: str = Depends(get_user_id)):
+    return await social_connect("linkedin", user_id)
 
 
 @api_router.post("/composio/linkedin/post")
 async def linkedin_post(payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
-    _require_auth_config()
+    _require_social_config("linkedin")
     content = (payload.get("content") or "").strip()
     if not content:
         raise HTTPException(status_code=400, detail="content is required")

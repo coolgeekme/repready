@@ -12,21 +12,33 @@ import { colors, fonts, radii, spacing } from "@/src/theme";
 const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "Founder/CEO"];
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
 
+type SocialState = { connected: boolean; configured?: boolean };
+const SOCIALS: { key: "linkedin" | "facebook" | "instagram"; label: string; icon: keyof typeof Ionicons.glyphMap; color: string }[] = [
+  { key: "linkedin", label: "LinkedIn", icon: "logo-linkedin", color: "#0A66C2" },
+  { key: "facebook", label: "Facebook", icon: "logo-facebook", color: "#1877F2" },
+  { key: "instagram", label: "Instagram", icon: "logo-instagram", color: "#E1306C" },
+];
+
 export default function Settings() {
   const { user, signOutUser } = useAuth();
   const [profile, setProfile] = useState<any>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [linkedIn, setLinkedIn] = useState<{ connected: boolean }>({ connected: false });
-  const [connecting, setConnecting] = useState(false);
+  const [socials, setSocials] = useState<Record<string, SocialState>>({});
+  const [connecting, setConnecting] = useState<string | null>(null);
   const [autoFilling, setAutoFilling] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [p, s] = await Promise.all([api.getProfile(), api.linkedinStatus()]);
+      const [p, ...statuses] = await Promise.all([
+        api.getProfile(),
+        ...SOCIALS.map((s) => api.socialStatus(s.key)),
+      ]);
       setProfile(p || {});
-      setLinkedIn(s || { connected: false });
+      const map: Record<string, SocialState> = {};
+      SOCIALS.forEach((s, i) => { map[s.key] = statuses[i] || { connected: false }; });
+      setSocials(map);
     } finally {
       setLoading(false);
     }
@@ -70,33 +82,29 @@ export default function Settings() {
     }
   };
 
-  const connectLinkedIn = async () => {
-    setConnecting(true);
+  const connectSocial = async (platform: "linkedin" | "facebook" | "instagram") => {
+    setConnecting(platform);
     try {
-      const res = await api.linkedinConnect();
+      const res = await api.socialConnect(platform);
       if (res?.already_connected) {
-        setToast("LinkedIn already connected");
+        setToast(`${platform} already connected`);
         setTimeout(() => setToast(null), 1500);
-        const status = await api.linkedinStatus();
-        setLinkedIn(status);
-        return;
-      }
-      if (res?.redirect_url) {
+      } else if (res?.redirect_url) {
         await WebBrowser.openBrowserAsync(res.redirect_url);
-        // Re-fetch after user returns
-        const status = await api.linkedinStatus();
-        setLinkedIn(status);
       }
+      // Refresh status after returning
+      const s = await api.socialStatus(platform);
+      setSocials((m) => ({ ...m, [platform]: s }));
     } catch (e: any) {
       const msg = e?.message || "";
       if (msg.includes("503")) {
-        setToast("LinkedIn not configured yet — see Composio dashboard");
+        setToast(`${platform} not configured`);
       } else {
-        setToast("LinkedIn connect failed");
+        setToast(`${platform} connect failed`);
       }
       setTimeout(() => setToast(null), 2500);
     } finally {
-      setConnecting(false);
+      setConnecting(null);
     }
   };
 
@@ -291,33 +299,42 @@ export default function Settings() {
           <Text style={styles.uploadHint}>PDF / TXT</Text>
         </TouchableOpacity>
 
-        {/* LinkedIn via Composio */}
-        <Text style={styles.sectionLabel}>LinkedIn integration</Text>
-        <View style={styles.linkedinCard}>
-          <Ionicons name="logo-linkedin" size={22} color="#0A66C2" />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.linkedinTitle}>
-              {linkedIn.connected ? "Connected" : (linkedIn as any)?.configured === false ? "Not configured" : "Not connected"}
-            </Text>
-            <Text style={styles.linkedinDesc}>
-              {(linkedIn as any)?.configured === false
-                ? "Add a LinkedIn Auth Config in the Composio dashboard to enable."
-                : "Post drafts directly to LinkedIn via Composio."}
-            </Text>
-          </View>
-          <TouchableOpacity
-            testID="settings-linkedin-connect"
-            style={[styles.smallBtn, linkedIn.connected && styles.smallBtnGhost]}
-            onPress={connectLinkedIn}
-            disabled={connecting || (linkedIn as any)?.configured === false}
-          >
-            {connecting ? <ActivityIndicator color={linkedIn.connected ? colors.text : "#fff"} /> : (
-              <Text style={[styles.smallBtnText, linkedIn.connected && { color: colors.text }]}>
-                {linkedIn.connected ? "Reconnect" : "Connect"}
-              </Text>
-            )}
-          </TouchableOpacity>
+        {/* Social integrations via Composio */}
+        <View style={styles.sectionHeader}>
+          <Ionicons name="share-social-outline" size={16} color={colors.primary} />
+          <Text style={styles.sectionHeaderText}>Social accounts</Text>
         </View>
+        <Text style={styles.helper}>Connect once, then post drafts straight from RepReady.</Text>
+
+        {SOCIALS.map((s) => {
+          const state = socials[s.key] || { connected: false };
+          const notConfigured = state.configured === false;
+          return (
+            <View key={s.key} style={styles.linkedinCard}>
+              <Ionicons name={s.icon} size={22} color={s.color} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.linkedinTitle}>
+                  {s.label} · {state.connected ? "Connected" : notConfigured ? "Not configured" : "Not connected"}
+                </Text>
+                <Text style={styles.linkedinDesc}>
+                  {notConfigured ? "Add an Auth Config in Composio dashboard." : `Post directly to ${s.label} from result cards.`}
+                </Text>
+              </View>
+              <TouchableOpacity
+                testID={`settings-${s.key}-connect`}
+                style={[styles.smallBtn, state.connected && styles.smallBtnGhost, { backgroundColor: state.connected ? "transparent" : s.color }]}
+                onPress={() => connectSocial(s.key)}
+                disabled={connecting === s.key || notConfigured}
+              >
+                {connecting === s.key ? <ActivityIndicator color={state.connected ? colors.text : "#fff"} size="small" /> : (
+                  <Text style={[styles.smallBtnText, state.connected && { color: colors.text }]}>
+                    {state.connected ? "Reconnect" : "Connect"}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          );
+        })}
 
         {/* Sign out */}
         <TouchableOpacity testID="settings-signout" style={styles.signOut} onPress={signOutUser}>
@@ -368,7 +385,7 @@ const styles = StyleSheet.create({
   uploadText: { flex: 1, color: colors.text, fontWeight: "600" },
   uploadHint: { color: colors.textSubtle, fontSize: 11 },
 
-  linkedinCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: spacing.md, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, backgroundColor: "#fff" },
+  linkedinCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: spacing.md, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, backgroundColor: "#fff", marginBottom: 8 },
   linkedinTitle: { fontWeight: "700", color: colors.text },
   linkedinDesc: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
   smallBtn: { backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radii.sm },
