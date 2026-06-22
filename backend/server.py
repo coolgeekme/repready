@@ -51,6 +51,11 @@ class UserProfile(BaseModel):
     role: Optional[str] = None
     industry: Optional[str] = None
     target_audience: Optional[str] = None
+    # Company info (used as context in every generation)
+    company_name: Optional[str] = None
+    company_website: Optional[str] = None
+    company_offerings: Optional[str] = None
+    company_value_props: Optional[str] = None
     guidelines_text: Optional[str] = None
     guidelines_file_name: Optional[str] = None
     guidelines_file_b64: Optional[str] = None  # base64 PDF
@@ -65,6 +70,10 @@ class ProfileUpdate(BaseModel):
     role: Optional[str] = None
     industry: Optional[str] = None
     target_audience: Optional[str] = None
+    company_name: Optional[str] = None
+    company_website: Optional[str] = None
+    company_offerings: Optional[str] = None
+    company_value_props: Optional[str] = None
     guidelines_text: Optional[str] = None
     guidelines_file_name: Optional[str] = None
     guidelines_file_b64: Optional[str] = None
@@ -183,11 +192,24 @@ def _profile_context(profile: Dict[str, Any]) -> str:
         parts.append(f"Sales Role: {profile['role']}")
     if profile.get("industry"):
         parts.append(f"Industry: {profile['industry']}")
+    if profile.get("company_name"):
+        parts.append(f"Company: {profile['company_name']}")
+    if profile.get("company_website"):
+        parts.append(f"Website: {profile['company_website']}")
+    if profile.get("company_offerings"):
+        parts.append(f"What the company sells / offerings:\n{profile['company_offerings'][:1500]}")
+    if profile.get("company_value_props"):
+        parts.append(f"Key value props / differentiators:\n{profile['company_value_props'][:1000]}")
     if profile.get("target_audience"):
         parts.append(f"Target Audience: {profile['target_audience']}")
     if profile.get("guidelines_text"):
-        parts.append(f"Company Guidelines:\n{profile['guidelines_text'][:2000]}")
-    return "\n".join(parts) if parts else "No profile context provided."
+        parts.append(f"Brand voice & guidelines:\n{profile['guidelines_text'][:1500]}")
+    if not parts:
+        return "No profile context provided."
+    return (
+        "Use the following as ground truth for the rep's company. Never invent products "
+        "or capabilities that aren't supported by these notes.\n" + "\n".join(parts)
+    )
 
 
 async def _save_history(user_id: str, type_: str, title: str, input_: Dict, output: Dict) -> Dict:

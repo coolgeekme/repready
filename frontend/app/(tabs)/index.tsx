@@ -59,6 +59,7 @@ export default function Home() {
   const onRefresh = () => { setRefreshing(true); load(); };
 
   const firstName = (user?.displayName || user?.email || "").split(" ")[0].split("@")[0];
+  const needsCompany = !profile?.company_offerings;
 
   return (
     <SafeAreaView edges={["top"]} style={styles.container}>
@@ -73,6 +74,7 @@ export default function Home() {
             <Text style={styles.h1}>Hi {firstName || "there"} 👋</Text>
             <Text style={styles.sub}>
               {profile?.role || "Set your role"} · {profile?.industry || "Set your industry"}
+              {profile?.company_name ? ` · ${profile.company_name}` : ""}
             </Text>
           </View>
           <TouchableOpacity testID="home-settings-button" onPress={() => router.push("/(tabs)/settings")} style={styles.iconBtn}>
@@ -105,6 +107,25 @@ export default function Home() {
 
         {/* Tools grid */}
         <Text style={styles.sectionLabel}>Generators</Text>
+        {!loading && needsCompany && (
+          <TouchableOpacity
+            testID="company-cta-banner"
+            style={styles.companyBanner}
+            onPress={() => router.push("/(tabs)/settings")}
+            activeOpacity={0.8}
+          >
+            <View style={styles.companyBannerIcon}>
+              <Ionicons name="business" size={18} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.companyBannerTitle}>Tell us about your company</Text>
+              <Text style={styles.companyBannerDesc}>
+                Add what you sell so every email, script & post is aligned to your offerings.
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.textSubtle} />
+          </TouchableOpacity>
+        )}
         <View style={styles.grid}>
           {TOOLS.map((t) => (
             <TouchableOpacity
@@ -166,4 +187,9 @@ const styles = StyleSheet.create({
 
   flatCta: { marginTop: spacing.md, flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 14, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm },
   flatCtaText: { flex: 1, color: colors.text, fontSize: 14, fontWeight: "600" },
+
+  companyBanner: { flexDirection: "row", alignItems: "center", gap: 12, padding: spacing.md, borderRadius: radii.sm, backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE" },
+  companyBannerIcon: { width: 36, height: 36, borderRadius: radii.sm, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
+  companyBannerTitle: { color: colors.text, fontWeight: "700", fontSize: 14 },
+  companyBannerDesc: { color: colors.textMuted, fontSize: 12, marginTop: 2, lineHeight: 17 },
 });

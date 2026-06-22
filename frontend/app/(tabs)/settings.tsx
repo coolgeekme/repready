@@ -144,8 +144,69 @@ export default function Settings() {
           placeholderTextColor={colors.textSubtle}
         />
 
+        {/* Company info section */}
+        <View style={styles.sectionHeader}>
+          <Ionicons name="business-outline" size={16} color={colors.primary} />
+          <Text style={styles.sectionHeaderText}>Company</Text>
+        </View>
+        <Text style={styles.helper}>Used as context in every generation so output matches what your company actually sells.</Text>
+
+        <Text style={styles.sectionLabel}>Company name</Text>
+        <TextInput
+          testID="settings-company-name"
+          style={styles.input}
+          value={profile.company_name || ""}
+          onChangeText={(t) => setProfile({ ...profile, company_name: t })}
+          onBlur={() => save({ company_name: profile.company_name || "" })}
+          placeholder="Acme Inc."
+          placeholderTextColor={colors.textSubtle}
+        />
+
+        <Text style={styles.sectionLabel}>Website (optional)</Text>
+        <TextInput
+          testID="settings-company-website"
+          style={styles.input}
+          value={profile.company_website || ""}
+          onChangeText={(t) => setProfile({ ...profile, company_website: t })}
+          onBlur={() => save({ company_website: profile.company_website || "" })}
+          placeholder="acme.com"
+          placeholderTextColor={colors.textSubtle}
+          autoCapitalize="none"
+          keyboardType="url"
+        />
+
+        <Text style={styles.sectionLabel}>What does your company sell?</Text>
+        <TextInput
+          testID="settings-company-offerings"
+          style={[styles.input, styles.textarea]}
+          value={profile.company_offerings || ""}
+          onChangeText={(t) => setProfile({ ...profile, company_offerings: t })}
+          onBlur={() => save({ company_offerings: profile.company_offerings || "" })}
+          multiline
+          placeholder={"Describe your product/service in 2-4 sentences. Who it's for, what it does, how it's delivered."}
+          placeholderTextColor={colors.textSubtle}
+        />
+
+        <Text style={styles.sectionLabel}>Key value props / differentiators (optional)</Text>
+        <TextInput
+          testID="settings-company-value-props"
+          style={[styles.input, styles.textarea]}
+          value={profile.company_value_props || ""}
+          onChangeText={(t) => setProfile({ ...profile, company_value_props: t })}
+          onBlur={() => save({ company_value_props: profile.company_value_props || "" })}
+          multiline
+          placeholder={"• 40% faster onboarding\n• SOC 2 compliant\n• Only solution with native Salesforce sync"}
+          placeholderTextColor={colors.textSubtle}
+        />
+
+        {/* Brand & guidelines section */}
+        <View style={styles.sectionHeader}>
+          <Ionicons name="reader-outline" size={16} color={colors.primary} />
+          <Text style={styles.sectionHeaderText}>Brand & guidelines</Text>
+        </View>
+
         {/* Guidelines paste */}
-        <Text style={styles.sectionLabel}>Company guidelines (text)</Text>
+        <Text style={styles.sectionLabel}>Brand voice (text)</Text>
         <TextInput
           testID="settings-guidelines-text"
           style={[styles.input, styles.textarea]}
@@ -211,6 +272,10 @@ const styles = StyleSheet.create({
   subEmail: { color: colors.textMuted, marginTop: 2 },
 
   sectionLabel: { color: colors.textSubtle, fontSize: 11, fontWeight: "700", letterSpacing: 2, textTransform: "uppercase", marginTop: spacing.lg, marginBottom: 8 },
+
+  sectionHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: spacing.xl, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.border },
+  sectionHeaderText: { fontSize: 18, fontWeight: "800", color: colors.text, letterSpacing: -0.4 },
+  helper: { color: colors.textMuted, fontSize: 13, marginTop: 8, lineHeight: 19 },
 
   chipsRow: { gap: 8, paddingRight: spacing.md },
   chip: { paddingHorizontal: 14, height: 36, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center", flexShrink: 0 },
