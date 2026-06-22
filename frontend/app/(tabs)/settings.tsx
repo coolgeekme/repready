@@ -74,6 +74,13 @@ export default function Settings() {
     setConnecting(true);
     try {
       const res = await api.linkedinConnect();
+      if (res?.already_connected) {
+        setToast("LinkedIn already connected");
+        setTimeout(() => setToast(null), 1500);
+        const status = await api.linkedinStatus();
+        setLinkedIn(status);
+        return;
+      }
       if (res?.redirect_url) {
         await WebBrowser.openBrowserAsync(res.redirect_url);
         // Re-fetch after user returns
@@ -81,8 +88,13 @@ export default function Settings() {
         setLinkedIn(status);
       }
     } catch (e: any) {
-      setToast("LinkedIn connect failed");
-      setTimeout(() => setToast(null), 1500);
+      const msg = e?.message || "";
+      if (msg.includes("503")) {
+        setToast("LinkedIn not configured yet — see Composio dashboard");
+      } else {
+        setToast("LinkedIn connect failed");
+      }
+      setTimeout(() => setToast(null), 2500);
     } finally {
       setConnecting(false);
     }
@@ -284,14 +296,20 @@ export default function Settings() {
         <View style={styles.linkedinCard}>
           <Ionicons name="logo-linkedin" size={22} color="#0A66C2" />
           <View style={{ flex: 1 }}>
-            <Text style={styles.linkedinTitle}>{linkedIn.connected ? "Connected" : "Not connected"}</Text>
-            <Text style={styles.linkedinDesc}>Post drafts directly to LinkedIn via Composio.</Text>
+            <Text style={styles.linkedinTitle}>
+              {linkedIn.connected ? "Connected" : (linkedIn as any)?.configured === false ? "Not configured" : "Not connected"}
+            </Text>
+            <Text style={styles.linkedinDesc}>
+              {(linkedIn as any)?.configured === false
+                ? "Add a LinkedIn Auth Config in the Composio dashboard to enable."
+                : "Post drafts directly to LinkedIn via Composio."}
+            </Text>
           </View>
           <TouchableOpacity
             testID="settings-linkedin-connect"
             style={[styles.smallBtn, linkedIn.connected && styles.smallBtnGhost]}
             onPress={connectLinkedIn}
-            disabled={connecting}
+            disabled={connecting || (linkedIn as any)?.configured === false}
           >
             {connecting ? <ActivityIndicator color={linkedIn.connected ? colors.text : "#fff"} /> : (
               <Text style={[styles.smallBtnText, linkedIn.connected && { color: colors.text }]}>

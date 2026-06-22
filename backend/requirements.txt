@@ -14,7 +14,8 @@ certifi==2026.6.17
 cffi==2.0.0
 charset-normalizer==3.4.7
 click==8.4.1
-composio_core==0.7.21
+composio==0.15.0
+composio-client==1.39.0
 cryptography==49.0.0
 distro==1.9.0
 dnspython==2.8.0
@@ -53,6 +54,7 @@ Jinja2==3.1.6
 jiter==0.15.0
 jmespath==1.1.0
 jq==1.11.0
+json-schema-to-pydantic==0.4.11
 jsonref==1.1.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1

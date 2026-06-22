@@ -25,6 +25,7 @@ db = client[os.environ["DB_NAME"]]
 
 EMERGENT_LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
 COMPOSIO_API_KEY = os.environ["COMPOSIO_API_KEY"]
+LINKEDIN_AUTH_CONFIG_ID = os.environ.get("LINKEDIN_AUTH_CONFIG_ID", "").strip()
 CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
 
 app = FastAPI(title="RepReady API")
@@ -562,51 +563,113 @@ async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_
 
 
 # ---------- Routes: Composio LinkedIn ----------
-def _composio_toolset():
-    from composio import ComposioToolSet
-    return ComposioToolSet(api_key=COMPOSIO_API_KEY)
+def _composio_client():
+    from composio import Composio
+    return Composio(api_key=COMPOSIO_API_KEY)
+
+
+def _require_auth_config() -> str:
+    if not LINKEDIN_AUTH_CONFIG_ID:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "LinkedIn is not configured yet. The Composio dashboard needs a "
+                "LinkedIn Auth Config (Toolkits → LinkedIn → Connect). Add the "
+                "resulting Auth Config ID (ac_...) to LINKEDIN_AUTH_CONFIG_ID."
+            ),
+        )
+    return LINKEDIN_AUTH_CONFIG_ID
 
 
 @api_router.get("/composio/linkedin/status")
 async def linkedin_status(user_id: str = Depends(get_user_id)):
     profile = await _get_profile(user_id)
-    return {
-        "connected": bool(profile.get("linkedin_connected")),
-        "connection_id": profile.get("linkedin_connection_id"),
-    }
+    if not LINKEDIN_AUTH_CONFIG_ID:
+        return {
+            "connected": False,
+            "configured": False,
+            "message": "LinkedIn integration not configured in Composio dashboard yet.",
+        }
+
+    import asyncio
+    def _list():
+        client = _composio_client()
+        return client.connected_accounts.list(
+            user_ids=[user_id],
+            auth_config_ids=[LINKEDIN_AUTH_CONFIG_ID],
+            statuses=["ACTIVE"],
+        )
+    try:
+        result = await asyncio.to_thread(_list)
+        items = getattr(result, "items", None) or list(result or [])
+        connected = len(items) > 0
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"linkedin_connected": connected, "user_id": user_id}},
+            upsert=True,
+        )
+        return {
+            "connected": connected,
+            "configured": True,
+            "connection_id": getattr(items[0], "id", None) if connected else profile.get("linkedin_connection_id"),
+        }
+    except Exception as e:
+        logger.warning(f"LinkedIn status check failed: {e}")
+        return {"connected": bool(profile.get("linkedin_connected")), "configured": True, "error": str(e)}
 
 
 @api_router.post("/composio/linkedin/connect")
 async def linkedin_connect(user_id: str = Depends(get_user_id)):
+    auth_config_id = _require_auth_config()
+    import asyncio
+    def _link():
+        client = _composio_client()
+        return client.connected_accounts.link(
+            user_id=user_id,
+            auth_config_id=auth_config_id,
+        )
     try:
-        toolset = _composio_toolset()
-        entity = toolset.get_entity(entity_id=user_id)
-        connection = entity.initiate_connection(app_name="linkedin")
+        cr = await asyncio.to_thread(_link)
+        redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
+        if not redirect_url:
+            raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
         await db.users.update_one(
             {"user_id": user_id},
             {"$set": {
                 "user_id": user_id,
-                "linkedin_connection_id": getattr(connection, "connectedAccountId", None),
+                "linkedin_connection_id": getattr(cr, "id", None) or getattr(cr, "connected_account_id", None),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }},
             upsert=True,
         )
-        return {"redirect_url": getattr(connection, "redirectUrl", None)}
+        return {"redirect_url": redirect_url}
+    except HTTPException:
+        raise
     except Exception as e:
+        msg = str(e)
+        if "ComposioMultipleConnectedAccountsError" in msg or "already has" in msg.lower():
+            # User already connected — return a marker the FE can interpret
+            return {"redirect_url": None, "already_connected": True}
         logger.error(f"Composio LinkedIn connect failed: {e}")
         raise HTTPException(status_code=502, detail=f"Composio error: {e}")
 
 
 @api_router.post("/composio/linkedin/post")
 async def linkedin_post(payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
-    content = payload.get("content", "").strip()
+    _require_auth_config()
+    content = (payload.get("content") or "").strip()
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
+    import asyncio
+    def _execute():
+        client = _composio_client()
+        return client.tools.execute(
+            user_id=user_id,
+            slug="LINKEDIN_CREATE_LINKED_IN_POST",
+            arguments={"text": content},
+        )
     try:
-        toolset = _composio_toolset()
-        entity = toolset.get_entity(entity_id=user_id)
-        result = entity.execute(action="LINKEDIN_CREATE_POST", params={"commentary": content})
-        # Mark connected once a successful post happens
+        result = await asyncio.to_thread(_execute)
         await db.users.update_one(
             {"user_id": user_id},
             {"$set": {"linkedin_connected": True}},
