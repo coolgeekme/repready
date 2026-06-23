@@ -74,6 +74,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Topic ideas
+  topicIdeas: (angle?: string) =>
+    request<any>("/generate/topic-ideas", { method: "POST", body: JSON.stringify({ angle }) }),
+
   // Companies
   listCompanies: () => request<any>("/companies"),
   createCompany: (body: any) => request<any>("/companies", { method: "POST", body: JSON.stringify(body) }),

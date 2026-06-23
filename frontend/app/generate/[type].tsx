@@ -35,6 +35,8 @@ export default function GenerateScreen() {
   const [imageMap, setImageMap] = useState<Record<number, { uri: string; loading?: boolean; error?: string }>>({});
   const [imagePromptMap, setImagePromptMap] = useState<Record<number, string>>({});
   const [scheduleMap, setScheduleMap] = useState<Record<number, { datetime: string; show: boolean; saving: boolean }>>({});
+  const [topicIdeas, setTopicIdeas] = useState<any[] | null>(null);
+  const [topicLoading, setTopicLoading] = useState(false);
 
   useEffect(() => {
     if (historyId) {
@@ -48,6 +50,18 @@ export default function GenerateScreen() {
       })();
     }
   }, [historyId]);
+
+  const suggestTopics = async () => {
+    setTopicLoading(true);
+    try {
+      const res = await api.topicIdeas();
+      setTopicIdeas(res.topics || []);
+    } catch (e: any) {
+      setErr("Couldn't generate topic ideas. Try again.");
+    } finally {
+      setTopicLoading(false);
+    }
+  };
 
   const fields = useMemo(() => fieldsFor(t), [t]);
 
@@ -169,6 +183,43 @@ export default function GenerateScreen() {
       >
         <Text style={styles.subtitle}>{meta.subtitle}</Text>
 
+        {/* Topic suggester (only for Social Post) */}
+        {t === "linkedin-post" && (
+          <View style={{ marginBottom: spacing.md }}>
+            <TouchableOpacity
+              testID="suggest-topics-btn"
+              style={[styles.imageBtn, { marginTop: 0 }]}
+              onPress={suggestTopics}
+              disabled={topicLoading}
+            >
+              {topicLoading ? <ActivityIndicator color={colors.text} /> : <Ionicons name="bulb-outline" size={16} color={colors.text} />}
+              <Text style={styles.imageBtnText}>
+                {topicLoading ? "Brainstorming topics…" : topicIdeas ? "Suggest different topics" : "Not sure what to post? Suggest topics"}
+              </Text>
+              <View style={styles.aiPill}><Text style={styles.aiPillText}>AI</Text></View>
+            </TouchableOpacity>
+            {topicIdeas && topicIdeas.length > 0 && (
+              <View style={{ marginTop: 8, gap: 8 }}>
+                {topicIdeas.map((t: any, i: number) => (
+                  <TouchableOpacity
+                    key={i}
+                    testID={`topic-idea-${i}`}
+                    style={{ borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, padding: 12, backgroundColor: "#fff" }}
+                    onPress={() => { setForm({ ...form, topic: t.topic }); setTopicIdeas(null); }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      {t.tag && <Text style={{ fontSize: 10, color: colors.primary, fontWeight: "800", letterSpacing: 1.2, textTransform: "uppercase" }}>{t.tag}</Text>}
+                    </View>
+                    <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14, marginBottom: 4 }}>{t.topic}</Text>
+                    {t.why && <Text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 17 }}>{t.why}</Text>}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+
         {fields.map((f) => (
           <View key={f.key} style={styles.field}>
             <Text style={styles.label}>{f.label}</Text>
@@ -273,6 +324,11 @@ function renderOutput(
   postingKey?: string | null,
   onGenerateImage?: (idx: number, hook: string, body: string) => void,
   imageMap?: Record<number, { uri: string; loading?: boolean; error?: string }>,
+  imagePromptMap?: Record<number, string>,
+  setImagePromptMap?: (fn: any) => void,
+  scheduleMap?: Record<number, { datetime: string; show: boolean; saving: boolean }>,
+  setScheduleMap?: (fn: any) => void,
+  onSchedule?: (idx: number, content: string) => void,
 ) {
   if (t === "cold-email") {
     return (out.variations || []).map((v: any, i: number) => (

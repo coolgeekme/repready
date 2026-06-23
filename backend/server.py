@@ -736,6 +736,32 @@ def _build_post_args(platform: str, content: str, image_url: Optional[str], auth
     return {}
 
 
+@api_router.post("/generate/topic-ideas")
+async def generate_topic_ideas(payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
+    profile = await _get_profile(user_id)
+    company = await _get_active_company(user_id) or await _ensure_company_from_legacy(user_id)
+    context = _profile_context(profile, company)
+    angle = (payload.get("angle") or "").strip()
+    schema = '''{
+  "topics": [
+    {"topic": "string (8-14 word post angle)", "why": "string (one-line: why this resonates)", "tag": "string (e.g., story, lesson, hot take, customer win, contrarian)"}
+  ]
+}'''
+    system = (
+        "You are RepReady. Generate scroll-stopping LinkedIn post topic ideas for the sales rep. "
+        "Make them SPECIFIC, tied to their company offerings and target audience. "
+        "Avoid generic motivational fluff. Reply with strict JSON only."
+    )
+    user_msg = (
+        f"Rep context:\n{context}\n\n"
+        f"Optional angle filter: {angle or 'mix of story, lesson, customer win, hot take, and tactical advice'}.\n"
+        "Generate 6 distinct, specific topic ideas the rep could post about this week.\n"
+        f"Return strictly this JSON:\n{schema}"
+    )
+    data = await _llm_generate_json(system, user_msg)
+    return data
+
+
 # ---------- Routes: Companies (multi-business) ----------
 @api_router.get("/companies")
 async def list_companies(user_id: str = Depends(get_user_id)):
