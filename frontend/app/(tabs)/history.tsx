@@ -85,6 +85,20 @@ export default function History() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{it.title}</Text>
                   <Text style={styles.rowMeta}>{meta.label} · {new Date(it.created_at).toLocaleDateString()}</Text>
+                  {Array.isArray(it.posted_to) && it.posted_to.length > 0 && (
+                    <View style={{ flexDirection: "row", gap: 4, marginTop: 4 }}>
+                      {it.posted_to.map((p: any, idx: number) => {
+                        const icon = p.platform === "linkedin" ? "logo-linkedin" : p.platform === "facebook" ? "logo-facebook" : "logo-instagram";
+                        const color = p.platform === "linkedin" ? "#0A66C2" : p.platform === "facebook" ? "#1877F2" : "#E1306C";
+                        return (
+                          <View key={idx} testID={`posted-${p.platform}-${it.id}`} style={{ flexDirection: "row", alignItems: "center", gap: 3, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: `${color}15` }}>
+                            <Ionicons name={icon as any} size={11} color={color} />
+                            <Text style={{ fontSize: 10, color, fontWeight: "700" }}>Posted</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
                 <TouchableOpacity testID={`history-save-${it.id}`} onPress={() => toggle(it.id)} hitSlop={8}>
                   <Ionicons name={it.saved ? "bookmark" : "bookmark-outline"} size={20} color={it.saved ? colors.primary : colors.textSubtle} />

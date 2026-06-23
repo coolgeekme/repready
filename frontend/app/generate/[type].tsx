@@ -33,6 +33,8 @@ export default function GenerateScreen() {
   const [toast, setToast] = useState<string | null>(null);
   const [posting, setPosting] = useState<string | null>(null);
   const [imageMap, setImageMap] = useState<Record<number, { uri: string; loading?: boolean; error?: string }>>({});
+  const [imagePromptMap, setImagePromptMap] = useState<Record<number, string>>({});
+  const [scheduleMap, setScheduleMap] = useState<Record<number, { datetime: string; show: boolean; saving: boolean }>>({});
 
   useEffect(() => {
     if (historyId) {
@@ -108,11 +110,41 @@ export default function GenerateScreen() {
   const generateImage = async (idx: number, hook: string, body: string) => {
     setImageMap((m) => ({ ...m, [idx]: { uri: "", loading: true } }));
     try {
-      const res = await api.generatePostImage({ hook, body });
+      const customPrompt = imagePromptMap[idx]?.trim();
+      const payload: any = customPrompt ? { prompt: customPrompt } : { hook, body };
+      const res = await api.generatePostImage(payload);
       const uri = `data:${res.mime_type || "image/png"};base64,${res.data}`;
       setImageMap((m) => ({ ...m, [idx]: { uri, loading: false } }));
     } catch (e: any) {
       setImageMap((m) => ({ ...m, [idx]: { uri: "", loading: false, error: "Image generation failed" } }));
+    }
+  };
+
+  const schedulePost = async (idx: number, content: string) => {
+    const entry = scheduleMap[idx];
+    if (!entry?.datetime) {
+      setErr("Pick a date and time first");
+      return;
+    }
+    setScheduleMap((m) => ({ ...m, [idx]: { ...entry, saving: true } }));
+    try {
+      const img = imageMap[idx];
+      let image_b64: string | undefined;
+      let image_mime: string | undefined;
+      if (img?.uri?.startsWith("data:")) {
+        const [head, body] = img.uri.split(",");
+        image_b64 = body;
+        const mm = /data:([^;]+);base64/.exec(head);
+        image_mime = mm?.[1] || "image/png";
+      }
+      const sched = new Date(entry.datetime).toISOString();
+      await api.schedulePost({ content, platforms: ["linkedin"], scheduled_for: sched, image_b64, image_mime });
+      setToast("Scheduled ✓");
+      setTimeout(() => setToast(null), 1800);
+      setScheduleMap((m) => ({ ...m, [idx]: { datetime: "", show: false, saving: false } }));
+    } catch (e: any) {
+      setErr(`Schedule failed. ${(e?.message || "").slice(0, 120)}`);
+      setScheduleMap((m) => ({ ...m, [idx]: { ...entry, saving: false } }));
     }
   };
 
@@ -175,6 +207,11 @@ export default function GenerateScreen() {
               posting,
               meta.canPostLinkedIn ? generateImage : undefined,
               imageMap,
+              imagePromptMap,
+              setImagePromptMap,
+              scheduleMap,
+              setScheduleMap,
+              meta.canPostLinkedIn ? schedulePost : undefined,
             )}
           </View>
         )}
@@ -378,6 +415,49 @@ function renderOutput(
           ) : null}
 
           {img?.error && <Text style={styles.error}>{img.error}</Text>}
+
+          {/* Custom image prompt input (only after first generation) */}
+          {onGenerateImage && (
+            <View style={{ marginTop: 8 }}>
+              <TextInput
+                testID={`image-prompt-${i}`}
+                style={[styles.input, { fontSize: 13, minHeight: 40, paddingVertical: 8 }]}
+                value={imagePromptMap?.[i] || ""}
+                onChangeText={(v) => setImagePromptMap?.((m: any) => ({ ...m, [i]: v }))}
+                placeholder="Custom image prompt (optional) — overrides auto-prompt"
+                placeholderTextColor={colors.textSubtle}
+                multiline
+              />
+            </View>
+          )}
+
+          {/* Schedule row */}
+          {onSchedule && (
+            <View style={{ marginTop: 10, gap: 8 }}>
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+                <Ionicons name="time-outline" size={16} color={colors.textMuted} />
+                <TextInput
+                  testID={`schedule-input-${i}`}
+                  style={[styles.input, { flex: 1, fontSize: 13, paddingVertical: 8 }]}
+                  value={scheduleMap?.[i]?.datetime || ""}
+                  onChangeText={(v) => setScheduleMap?.((m: any) => ({ ...m, [i]: { ...(m[i] || {}), datetime: v, show: true } }))}
+                  placeholder="YYYY-MM-DDTHH:mm (e.g., 2026-06-25T15:30)"
+                  placeholderTextColor={colors.textSubtle}
+                  autoCapitalize="none"
+                />
+                <TouchableOpacity
+                  testID={`schedule-btn-${i}`}
+                  style={[styles.platformBtn, { backgroundColor: colors.text, flex: 0, paddingHorizontal: 12 }]}
+                  onPress={() => onSchedule(i, full)}
+                  disabled={scheduleMap?.[i]?.saving}
+                >
+                  {scheduleMap?.[i]?.saving ? <ActivityIndicator color="#fff" size="small" /> : (
+                    <Text style={styles.platformBtnText}>Schedule</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
 
           {/* Platform post buttons */}
           {onPost && (

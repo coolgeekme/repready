@@ -28,6 +28,16 @@ export default function Settings() {
   const [socials, setSocials] = useState<Record<string, SocialState>>({});
   const [connecting, setConnecting] = useState<string | null>(null);
   const [autoFilling, setAutoFilling] = useState(false);
+  const [companies, setCompanies] = useState<any[]>([]);
+  const [activeCompanyId, setActiveCompanyId] = useState<string | null>(null);
+
+  const loadCompanies = useCallback(async () => {
+    try {
+      const res = await api.listCompanies();
+      setCompanies(res.items || []);
+      setActiveCompanyId(res.active_id || null);
+    } catch (e) {}
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -44,7 +54,7 @@ export default function Settings() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); loadCompanies(); }, [load, loadCompanies]);
 
   const save = async (patch: any) => {
     const next = { ...profile, ...patch };
@@ -120,6 +130,54 @@ export default function Settings() {
       setTimeout(() => setToast(null), 2000);
     } finally {
       setConnecting(null);
+    }
+  };
+
+  const activateCompany = async (id: string) => {
+    try {
+      await api.activateCompany(id);
+      setActiveCompanyId(id);
+      // Load that company's fields into the form
+      const c = companies.find((x) => x.id === id);
+      if (c) {
+        const patch = {
+          company_name: c.name, company_website: c.website,
+          company_offerings: c.offerings, company_value_props: c.value_props,
+          industry: c.industry, target_audience: c.target_audience,
+        };
+        setProfile({ ...profile, ...patch });
+      }
+      setToast("Active company switched");
+      setTimeout(() => setToast(null), 1500);
+    } catch (e) {
+      setToast("Switch failed");
+      setTimeout(() => setToast(null), 1500);
+    }
+  };
+
+  const addCompany = async () => {
+    const name = (profile.company_name || "").trim();
+    if (!name) {
+      setToast("Type a company name first");
+      setTimeout(() => setToast(null), 1500);
+      return;
+    }
+    try {
+      const c = await api.createCompany({
+        name,
+        website: profile.company_website,
+        offerings: profile.company_offerings,
+        value_props: profile.company_value_props,
+        industry: profile.industry,
+        target_audience: profile.target_audience,
+      });
+      await loadCompanies();
+      await activateCompany(c.id);
+      setToast(`Added ${c.name}`);
+      setTimeout(() => setToast(null), 1500);
+    } catch (e) {
+      setToast("Add failed");
+      setTimeout(() => setToast(null), 1500);
     }
   };
 
@@ -210,9 +268,29 @@ export default function Settings() {
         {/* Company info section */}
         <View style={styles.sectionHeader}>
           <Ionicons name="business-outline" size={16} color={colors.primary} />
-          <Text style={styles.sectionHeaderText}>Company</Text>
+          <Text style={styles.sectionHeaderText}>Companies</Text>
         </View>
-        <Text style={styles.helper}>Used as context in every generation so output matches what your company actually sells.</Text>
+        <Text style={styles.helper}>Switch between businesses. The active one drives every generation.</Text>
+
+        {companies.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
+            {companies.map((c) => (
+              <TouchableOpacity
+                key={c.id}
+                testID={`company-chip-${c.id}`}
+                onPress={() => activateCompany(c.id)}
+                style={[styles.chip, activeCompanyId === c.id && styles.chipActive]}
+              >
+                <Text style={[styles.chipText, activeCompanyId === c.id && styles.chipTextActive]}>{c.name}</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity testID="company-chip-add" onPress={addCompany} style={[styles.chip, { borderStyle: "dashed" }]}>
+              <Text style={[styles.chipText, { color: colors.primary }]}>+ Add</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        )}
+
+        <Text style={styles.helper}>{activeCompanyId ? "Editing active company below:" : "Fill the fields below, then tap + Add to save as a new company."}</Text>
 
         <Text style={styles.sectionLabel}>Company name</Text>
         <TextInput

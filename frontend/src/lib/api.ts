@@ -74,6 +74,18 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Companies
+  listCompanies: () => request<any>("/companies"),
+  createCompany: (body: any) => request<any>("/companies", { method: "POST", body: JSON.stringify(body) }),
+  updateCompany: (id: string, body: any) => request<any>(`/companies/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteCompany: (id: string) => request<any>(`/companies/${id}`, { method: "DELETE" }),
+  activateCompany: (id: string) => request<any>(`/companies/${id}/activate`, { method: "POST" }),
+
+  // Scheduled posts
+  schedulePost: (body: any) => request<any>("/scheduled", { method: "POST", body: JSON.stringify(body) }),
+  listScheduled: () => request<any>("/scheduled"),
+  cancelScheduled: (id: string) => request<any>(`/scheduled/${id}`, { method: "DELETE" }),
+
   // Company autofill
   companyAutofill: (company_name: string, company_website?: string) =>
     request<any>("/company/autofill", {
