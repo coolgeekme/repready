@@ -915,15 +915,16 @@ async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
     auth_config_id = _require_social_config(platform)
 
     import asyncio
-    def _link(allow_multiple: bool = False):
+    def _link(allow_multiple: bool = True):
         client = _composio_client()
-        kwargs: Dict[str, Any] = {"user_id": user_id, "auth_config_id": auth_config_id}
-        if allow_multiple:
-            kwargs["allow_multiple"] = True
-        return client.connected_accounts.link(**kwargs)
+        return client.connected_accounts.link(
+            user_id=user_id,
+            auth_config_id=auth_config_id,
+            allow_multiple=allow_multiple,
+        )
     try:
         try:
-            cr = await asyncio.to_thread(_link, False)
+            cr = await asyncio.to_thread(_link, True)
         except Exception as e:
             msg = str(e)
             if "Multiple connected accounts" in msg or "allow_multiple" in msg:
@@ -1154,6 +1155,93 @@ async def _scheduler_loop():
         except Exception as e:
             logger.error(f"Scheduler loop error: {e}")
         await asyncio.sleep(60)
+
+
+@api_router.get("/social/{platform}/accounts")
+async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id)):
+    if platform not in SOCIAL_AUTH_CONFIGS:
+        raise HTTPException(status_code=404, detail="Unknown platform")
+    auth_config_id = SOCIAL_AUTH_CONFIGS.get(platform, "")
+    if not auth_config_id:
+        return {"platform": platform, "accounts": [], "configured": False}
+    import asyncio
+    def _list():
+        client = _composio_client()
+        return client.connected_accounts.list(
+            user_ids=[user_id],
+            auth_config_ids=[auth_config_id],
+        )
+    result = await asyncio.to_thread(_list)
+    items = getattr(result, "items", None) or list(result or [])
+    accounts = []
+    for it in items:
+        conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+        status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
+        created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
+        if not conn_id:
+            continue
+        # Best-effort display name fetch
+        display_name = None
+        if platform == "linkedin" and status == "ACTIVE":
+            try:
+                def _info():
+                    client = _composio_client()
+                    return client.tools.execute(
+                        user_id=user_id,
+                        slug="LINKEDIN_GET_MY_INFO",
+                        arguments={},
+                        connected_account_id=conn_id,
+                        dangerously_skip_version_check=True,
+                    )
+                info = await asyncio.to_thread(_info) if False else await asyncio.to_thread(_info)
+                data = getattr(info, "data", None) or (info.get("data") if isinstance(info, dict) else None) or {}
+                if isinstance(data, dict):
+                    display_name = data.get("name") or data.get("given_name") or data.get("localizedFirstName")
+            except Exception as e:
+                logger.warning(f"Could not fetch display name for {conn_id}: {e}")
+        accounts.append({
+            "id": conn_id,
+            "status": status,
+            "created_at": created,
+            "display_name": display_name or f"…{conn_id[-8:]}",
+        })
+    return {"platform": platform, "accounts": accounts, "configured": True}
+
+
+@api_router.delete("/social/{platform}/accounts/{conn_id}")
+async def delete_social_account(platform: str, conn_id: str, user_id: str = Depends(get_user_id)):
+    import asyncio
+    def _del():
+        client = _composio_client()
+        return client.connected_accounts.delete(nanoid=conn_id)
+    try:
+        await asyncio.to_thread(_del)
+    except Exception as e:
+        logger.warning(f"Delete connection {conn_id} failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e)[:200])
+    # Remove from any company that referenced this account
+    await db.companies.update_many(
+        {"user_id": user_id, f"linked_accounts.{platform}": conn_id},
+        {"$unset": {f"linked_accounts.{platform}": ""}},
+    )
+    return {"deleted": True}
+
+
+@api_router.post("/companies/{company_id}/link-account")
+async def link_account_to_company(company_id: str, payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
+    platform = (payload.get("platform") or "").strip().lower()
+    account_id = (payload.get("connected_account_id") or "").strip() or None  # null clears
+    if platform not in SOCIAL_AUTH_CONFIGS:
+        raise HTTPException(status_code=400, detail="Unknown platform")
+    update = {f"linked_accounts.{platform}": account_id} if account_id else {}
+    unset = {f"linked_accounts.{platform}": ""} if not account_id else {}
+    res = await db.companies.update_one(
+        {"id": company_id, "user_id": user_id},
+        {"$set": update, "$unset": unset},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return await db.companies.find_one({"id": company_id, "user_id": user_id}, {"_id": 0})
 
 
 # --- Legacy LinkedIn-specific endpoints (kept for the post button on result cards) ---

@@ -36,8 +36,54 @@ export default function Settings() {
       const res = await api.listCompanies();
       setCompanies(res.items || []);
       setActiveCompanyId(res.active_id || null);
+      // Sync the active company into the form for editing
+      if (res.active_id) {
+        const active = (res.items || []).find((c: any) => c.id === res.active_id);
+        if (active) {
+          setProfile((prev: any) => ({
+            ...prev,
+            company_name: active.name || "",
+            company_website: active.website || "",
+            company_offerings: active.offerings || "",
+            company_value_props: active.value_props || "",
+            industry: active.industry || prev?.industry,
+            target_audience: active.target_audience || prev?.target_audience,
+          }));
+        }
+      }
     } catch (e) {}
   }, []);
+
+  // Save changes to the company record (or fall back to profile if no active company)
+  const saveCompanyField = async (patch: any) => {
+    setProfile((p: any) => ({ ...p, ...patch }));
+    try {
+      if (activeCompanyId) {
+        const mapped: any = {};
+        if (patch.company_name !== undefined) mapped.name = patch.company_name;
+        if (patch.company_website !== undefined) mapped.website = patch.company_website;
+        if (patch.company_offerings !== undefined) mapped.offerings = patch.company_offerings;
+        if (patch.company_value_props !== undefined) mapped.value_props = patch.company_value_props;
+        if (patch.industry !== undefined) mapped.industry = patch.industry;
+        if (patch.target_audience !== undefined) mapped.target_audience = patch.target_audience;
+        if (Object.keys(mapped).length > 0) {
+          // Need the company name to be present for the schema
+          const current = companies.find((c) => c.id === activeCompanyId) || {};
+          mapped.name = mapped.name ?? current.name ?? "";
+          if (!mapped.name) return; // can't save without a name
+          await api.updateCompany(activeCompanyId, mapped);
+          await loadCompanies();
+        }
+      } else {
+        await api.updateProfile(patch);
+      }
+      setToast("Saved");
+      setTimeout(() => setToast(null), 1200);
+    } catch (e) {
+      setToast("Save failed");
+      setTimeout(() => setToast(null), 1500);
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -137,15 +183,17 @@ export default function Settings() {
     try {
       await api.activateCompany(id);
       setActiveCompanyId(id);
-      // Load that company's fields into the form
       const c = companies.find((x) => x.id === id);
       if (c) {
-        const patch = {
-          company_name: c.name, company_website: c.website,
-          company_offerings: c.offerings, company_value_props: c.value_props,
-          industry: c.industry, target_audience: c.target_audience,
-        };
-        setProfile({ ...profile, ...patch });
+        setProfile((p: any) => ({
+          ...p,
+          company_name: c.name || "",
+          company_website: c.website || "",
+          company_offerings: c.offerings || "",
+          company_value_props: c.value_props || "",
+          industry: c.industry || p?.industry,
+          target_audience: c.target_audience || p?.target_audience,
+        }));
       }
       setToast("Active company switched");
       setTimeout(() => setToast(null), 1500);
@@ -171,13 +219,15 @@ export default function Settings() {
         industry: profile.industry,
         target_audience: profile.target_audience,
       });
+      // Activate it server-side
+      await api.activateCompany(c.id);
+      // Refresh local state from server (single source of truth)
       await loadCompanies();
-      await activateCompany(c.id);
       setToast(`Added ${c.name}`);
       setTimeout(() => setToast(null), 1500);
-    } catch (e) {
-      setToast("Add failed");
-      setTimeout(() => setToast(null), 1500);
+    } catch (e: any) {
+      setToast(`Add failed: ${(e?.message || "").slice(0, 80)}`);
+      setTimeout(() => setToast(null), 2200);
     }
   };
 
@@ -197,7 +247,21 @@ export default function Settings() {
         target_audience: res.target_audience || profile.target_audience,
       };
       setProfile({ ...profile, ...patch });
-      await api.updateProfile(patch);
+      // Persist to the active company (or profile fallback) — uses single source of truth
+      if (activeCompanyId) {
+        const current = companies.find((c) => c.id === activeCompanyId);
+        await api.updateCompany(activeCompanyId, {
+          name: current?.name || profile.company_name,
+          website: profile.company_website,
+          offerings: patch.company_offerings,
+          value_props: patch.company_value_props,
+          industry: patch.industry,
+          target_audience: patch.target_audience,
+        });
+        await loadCompanies();
+      } else {
+        await api.updateProfile(patch);
+      }
       setToast(res.fetched_site ? "Auto-filled from site" : "Auto-filled (no site reached)");
       setTimeout(() => setToast(null), 1800);
     } catch (e: any) {
@@ -298,7 +362,7 @@ export default function Settings() {
           style={styles.input}
           value={profile.company_name || ""}
           onChangeText={(t) => setProfile({ ...profile, company_name: t })}
-          onBlur={() => save({ company_name: profile.company_name || "" })}
+          onBlur={() => saveCompanyField({ company_name: profile.company_name || "" })}
           placeholder="Acme Inc."
           placeholderTextColor={colors.textSubtle}
         />
@@ -309,7 +373,7 @@ export default function Settings() {
           style={styles.input}
           value={profile.company_website || ""}
           onChangeText={(t) => setProfile({ ...profile, company_website: t })}
-          onBlur={() => save({ company_website: profile.company_website || "" })}
+          onBlur={() => saveCompanyField({ company_website: profile.company_website || "" })}
           placeholder="acme.com"
           placeholderTextColor={colors.textSubtle}
           autoCapitalize="none"
@@ -347,7 +411,7 @@ export default function Settings() {
           style={[styles.input, styles.textarea]}
           value={profile.company_offerings || ""}
           onChangeText={(t) => setProfile({ ...profile, company_offerings: t })}
-          onBlur={() => save({ company_offerings: profile.company_offerings || "" })}
+          onBlur={() => saveCompanyField({ company_offerings: profile.company_offerings || "" })}
           multiline
           placeholder={"Describe your product/service in 2-4 sentences. Who it's for, what it does, how it's delivered."}
           placeholderTextColor={colors.textSubtle}
@@ -359,7 +423,7 @@ export default function Settings() {
           style={[styles.input, styles.textarea]}
           value={profile.company_value_props || ""}
           onChangeText={(t) => setProfile({ ...profile, company_value_props: t })}
-          onBlur={() => save({ company_value_props: profile.company_value_props || "" })}
+          onBlur={() => saveCompanyField({ company_value_props: profile.company_value_props || "" })}
           multiline
           placeholder={"• 40% faster onboarding\n• SOC 2 compliant\n• Only solution with native Salesforce sync"}
           placeholderTextColor={colors.textSubtle}
