@@ -584,6 +584,44 @@ SOCIAL_POST_TOOLS: Dict[str, Dict[str, Any]] = {
 }
 
 
+async def _linkedin_upload_image(user_id: str, author_urn: str, image_b64: str, mimetype: str) -> str:
+    """Upload a base64 image to LinkedIn via Composio's INITIALIZE_IMAGE_UPLOAD and a direct PUT.
+    Returns the LinkedIn image URN (e.g., 'urn:li:image:C4E10AQF...').
+    """
+    import asyncio, base64
+    def _init():
+        client = _composio_client()
+        return client.tools.execute(
+            user_id=user_id,
+            slug="LINKEDIN_INITIALIZE_IMAGE_UPLOAD",
+            arguments={"owner": author_urn},
+            dangerously_skip_version_check=True,
+        )
+    init = await asyncio.to_thread(_init)
+    raw: Any = init.data if hasattr(init, "data") else (init.get("data") if isinstance(init, dict) else init)
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=502, detail=f"LinkedIn upload init returned unexpected shape: {type(raw)}")
+    # The actual LinkedIn API response is usually under 'value' or 'response_data'
+    payload = raw.get("response_data") or raw.get("value") or raw
+    if isinstance(payload, dict) and "value" in payload and isinstance(payload["value"], dict):
+        payload = payload["value"]
+    upload_url = payload.get("uploadUrl") or payload.get("upload_url") or payload.get("uploadURL")
+    image_urn = payload.get("image") or payload.get("imageUrn") or payload.get("image_urn") or payload.get("asset")
+    if not upload_url or not image_urn:
+        logger.error(f"LinkedIn upload init payload missing fields: {str(payload)[:600]}")
+        raise HTTPException(status_code=502, detail="LinkedIn did not return an upload URL")
+    img_bytes = base64.b64decode(image_b64)
+    async with httpx.AsyncClient(timeout=30.0) as http_client:
+        put = await http_client.put(
+            upload_url,
+            content=img_bytes,
+            headers={"Content-Type": mimetype or "image/png"},
+        )
+        if put.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"LinkedIn image PUT failed: {put.status_code}")
+    return image_urn
+
+
 async def _linkedin_get_author_urn(user_id: str) -> str:
     """Return cached LinkedIn person URN or fetch via LINKEDIN_GET_MY_INFO."""
     profile = await _get_profile(user_id)
@@ -724,15 +762,26 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
     _require_social_config(platform)
     content = (payload.get("content") or "").strip()
     image_url = (payload.get("image_url") or "").strip() or None
+    image_b64 = payload.get("image_b64") or None  # data URI or raw base64
+    image_mime = (payload.get("image_mime") or "image/png").strip()
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
 
-    tool = SOCIAL_POST_TOOLS[platform]
-    if tool["needs_image"] and not image_url:
-        raise HTTPException(status_code=400, detail=f"{platform} requires an image_url")
+    # Strip data-URI prefix if present
+    if image_b64 and image_b64.startswith("data:"):
+        try:
+            head, image_b64 = image_b64.split(",", 1)
+            # Try to detect mimetype from the data URI header
+            if "image/" in head:
+                image_mime = head.split(":")[1].split(";")[0]
+        except Exception:
+            pass
 
-    # LinkedIn requires the author URN — fetch (and cache) before posting
-    author_urn: Optional[str] = None
+    tool = SOCIAL_POST_TOOLS[platform]
+    if tool["needs_image"] and not image_url and not image_b64:
+        raise HTTPException(status_code=400, detail=f"{platform} requires an image")
+
+    # LinkedIn-specific: build args with optional image upload
     if platform == "linkedin":
         try:
             author_urn = await _linkedin_get_author_urn(user_id)
@@ -742,7 +791,25 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
             logger.error(f"LinkedIn URN fetch failed: {e}")
             raise HTTPException(status_code=502, detail=f"Couldn't read LinkedIn profile: {e}")
 
-    args = _build_post_args(platform, content, image_url, author_urn)
+        args: Dict[str, Any] = {"author": author_urn, "commentary": content}
+        if image_b64:
+            try:
+                image_urn = await _linkedin_upload_image(user_id, author_urn, image_b64, image_mime)
+                ext = "jpg" if "jpeg" in image_mime else (image_mime.split("/")[-1] or "png")
+                args["images"] = [{
+                    "name": f"repready-post.{ext}",
+                    "mimetype": image_mime,
+                    "s3key": image_urn,  # LinkedIn URN — Composio passes through as the asset reference
+                }]
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"LinkedIn image upload failed: {e}")
+                # Continue with text-only rather than fail the whole post
+                args.pop("images", None)
+    else:
+        args = _build_post_args(platform, content, image_url, None)
+
     slug = tool["slug"]
     import asyncio
     def _execute():
@@ -756,23 +823,13 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
 
     def _humanize_provider_error(raw: Any, platform: str) -> str:
         s = str(raw or "")
-        # Composio sometimes forwards the provider's HTML error page verbatim.
         if "<html" in s.lower() or "<!doctype" in s.lower():
-            if platform == "linkedin":
-                if "w_member_social" in s or "scope" in s.lower():
-                    return ("LinkedIn rejected the post: missing 'w_member_social' OAuth scope. "
-                            "In Composio dashboard → LinkedIn Auth Config, ensure 'Share on LinkedIn' "
-                            "product is approved and scope 'w_member_social' is requested, then reconnect.")
-                return ("LinkedIn rejected the post. Most likely the OAuth scope 'w_member_social' "
-                        "is missing from your Composio LinkedIn Auth Config. Reconnect after fixing.")
             return f"{platform.capitalize()} rejected the request. Reconnect your account or check scopes."
-        # Truncate and strip
         s = re.sub(r"\s+", " ", s).strip()
         return s[:400]
 
     try:
         result = await asyncio.to_thread(_execute)
-        # Detect success/failure shape
         success = True
         err_payload: Any = None
         try:
@@ -788,7 +845,7 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
             msg = _humanize_provider_error(err_payload or result, platform)
             logger.error(f"Composio {platform} post failed (provider): {str(err_payload)[:500]}")
             raise HTTPException(status_code=502, detail=msg)
-        return {"success": True, "platform": platform, "result": str(result)[:600]}
+        return {"success": True, "platform": platform, "with_image": bool(args.get("images") or image_b64 or image_url), "result": str(result)[:400]}
     except HTTPException:
         raise
     except Exception as e:

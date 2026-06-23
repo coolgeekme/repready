@@ -75,22 +75,30 @@ export default function GenerateScreen() {
     setErr(null);
     try {
       const image = imageMap[idx];
-      const imageUrl = image?.uri;
-      if (platform === "instagram" && !imageUrl) {
+      const dataUri = image?.uri;
+      if (platform === "instagram" && !dataUri) {
         setErr("Instagram needs an image. Tap \"Generate image\" first.");
         return;
       }
-      await api.socialPost(platform, content, imageUrl);
-      setToast(`Posted to ${platform.charAt(0).toUpperCase() + platform.slice(1)} ✓`);
-      setTimeout(() => setToast(null), 1800);
+      // Parse base64 + mime from data URI for backend image upload
+      let image_b64: string | undefined;
+      let image_mime: string | undefined;
+      if (dataUri && dataUri.startsWith("data:")) {
+        const [head, body] = dataUri.split(",");
+        image_b64 = body;
+        const m = /data:([^;]+);base64/.exec(head);
+        image_mime = m?.[1] || "image/png";
+      }
+      await api.socialPost(platform, content, { image_url: dataUri, image_b64, image_mime });
+      const withImage = !!image_b64;
+      setToast(`Posted to ${platform.charAt(0).toUpperCase() + platform.slice(1)}${withImage ? " with image" : ""} ✓`);
+      setTimeout(() => setToast(null), 2000);
     } catch (e: any) {
       const m = e?.message || "";
       if (m.includes("ConnectedAccountNotFound") || m.includes("No connected account")) {
         setErr(`Connect ${platform} in Settings first.`);
-      } else if (m.includes("Image data URLs")) {
-        setErr(`${platform} needs a public image URL — base64 isn't supported by the platform yet.`);
       } else {
-        setErr(`Couldn't post to ${platform}. ${m.slice(0, 160)}`);
+        setErr(`Couldn't post to ${platform}. ${m.slice(0, 200)}`);
       }
     } finally {
       setPosting(null);

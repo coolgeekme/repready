@@ -59,10 +59,10 @@ export const api = {
     request<any>(`/social/${platform}/status`),
   socialConnect: (platform: string) =>
     request<any>(`/social/${platform}/connect`, { method: "POST" }),
-  socialPost: (platform: string, content: string, image_url?: string) =>
+  socialPost: (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string }) =>
     request<any>(`/social/${platform}/post`, {
       method: "POST",
-      body: JSON.stringify({ content, image_url }),
+      body: JSON.stringify({ content, ...(options || {}) }),
     }),
 
   // Image generation
