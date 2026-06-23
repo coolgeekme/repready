@@ -570,20 +570,68 @@ async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_
 SOCIAL_POST_TOOLS: Dict[str, Dict[str, Any]] = {
     "linkedin": {
         "slug": "LINKEDIN_CREATE_LINKED_IN_POST",
-        "build_args": lambda content, image_url=None: {"text": content},
+        # Built dynamically per-call because LinkedIn requires the author URN
         "needs_image": False,
     },
     "facebook": {
         "slug": "FACEBOOK_CREATE_POST",
-        "build_args": lambda content, image_url=None: {"text": content},
         "needs_image": False,
     },
     "instagram": {
         "slug": "INSTAGRAM_CREATE_POST",
-        "build_args": lambda content, image_url=None: {"caption": content, "image_url": image_url or ""},
         "needs_image": True,
     },
 }
+
+
+async def _linkedin_get_author_urn(user_id: str) -> str:
+    """Return cached LinkedIn person URN or fetch via LINKEDIN_GET_MY_INFO."""
+    profile = await _get_profile(user_id)
+    cached = profile.get("linkedin_author_urn")
+    if cached:
+        return cached
+    import asyncio
+    def _call():
+        client = _composio_client()
+        return client.tools.execute(
+            user_id=user_id,
+            slug="LINKEDIN_GET_MY_INFO",
+            arguments={},
+            dangerously_skip_version_check=True,
+        )
+    result = await asyncio.to_thread(_call)
+    # Result shape: {data: {..., id: '...', sub: '...'}} or pydantic model
+    data: Any = None
+    try:
+        if hasattr(result, "data"):
+            data = result.data
+        elif isinstance(result, dict):
+            data = result.get("data") or result
+    except Exception:
+        data = result
+    # Try multiple known keys for the person identifier
+    person_id = None
+    if isinstance(data, dict):
+        person_id = data.get("id") or data.get("sub") or data.get("response_data", {}).get("id")
+    if not person_id:
+        raise HTTPException(status_code=502, detail="Could not retrieve LinkedIn profile ID. Reconnect LinkedIn.")
+    author_urn = f"urn:li:person:{person_id}"
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"linkedin_author_urn": author_urn, "user_id": user_id}},
+        upsert=True,
+    )
+    return author_urn
+
+
+def _build_post_args(platform: str, content: str, image_url: Optional[str], author_urn: Optional[str]) -> Dict[str, Any]:
+    if platform == "linkedin":
+        return {"author": author_urn or "", "commentary": content}
+    if platform == "facebook":
+        return {"text": content}
+    if platform == "instagram":
+        return {"caption": content, "image_url": image_url or ""}
+    return {}
 
 
 # ---------- Routes: Composio Social (LinkedIn / Facebook / Instagram) ----------
@@ -640,14 +688,21 @@ async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
     auth_config_id = _require_social_config(platform)
 
     import asyncio
-    def _link():
+    def _link(allow_multiple: bool = False):
         client = _composio_client()
-        return client.connected_accounts.link(
-            user_id=user_id,
-            auth_config_id=auth_config_id,
-        )
+        kwargs: Dict[str, Any] = {"user_id": user_id, "auth_config_id": auth_config_id}
+        if allow_multiple:
+            kwargs["allow_multiple"] = True
+        return client.connected_accounts.link(**kwargs)
     try:
-        cr = await asyncio.to_thread(_link)
+        try:
+            cr = await asyncio.to_thread(_link, False)
+        except Exception as e:
+            msg = str(e)
+            if "Multiple connected accounts" in msg or "allow_multiple" in msg:
+                # User already has at least one connection — surface that
+                return {"platform": platform, "redirect_url": None, "already_connected": True}
+            raise
         redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
         if not redirect_url:
             raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
@@ -676,7 +731,18 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
     if tool["needs_image"] and not image_url:
         raise HTTPException(status_code=400, detail=f"{platform} requires an image_url")
 
-    args = tool["build_args"](content, image_url)
+    # LinkedIn requires the author URN — fetch (and cache) before posting
+    author_urn: Optional[str] = None
+    if platform == "linkedin":
+        try:
+            author_urn = await _linkedin_get_author_urn(user_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"LinkedIn URN fetch failed: {e}")
+            raise HTTPException(status_code=502, detail=f"Couldn't read LinkedIn profile: {e}")
+
+    args = _build_post_args(platform, content, image_url, author_urn)
     slug = tool["slug"]
     import asyncio
     def _execute():
@@ -751,10 +817,23 @@ async def linkedin_post(payload: Dict[str, Any], user_id: str = Depends(get_user
     import asyncio
     def _execute():
         client = _composio_client()
+        # Fetch URN inline so the legacy endpoint stays self-contained
+        info = client.tools.execute(
+            user_id=user_id,
+            slug="LINKEDIN_GET_MY_INFO",
+            arguments={},
+            dangerously_skip_version_check=True,
+        )
+        info_data: Any = getattr(info, "data", None) or (info.get("data") if isinstance(info, dict) else None) or info
+        person_id = None
+        if isinstance(info_data, dict):
+            person_id = info_data.get("id") or info_data.get("sub")
+        if not person_id:
+            raise RuntimeError("Could not resolve LinkedIn person URN")
         return client.tools.execute(
             user_id=user_id,
             slug="LINKEDIN_CREATE_LINKED_IN_POST",
-            arguments={"text": content},
+            arguments={"author": f"urn:li:person:{person_id}", "commentary": content},
             dangerously_skip_version_check=True,
         )
     try:
