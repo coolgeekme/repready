@@ -584,42 +584,40 @@ SOCIAL_POST_TOOLS: Dict[str, Dict[str, Any]] = {
 }
 
 
-async def _linkedin_upload_image(user_id: str, author_urn: str, image_b64: str, mimetype: str) -> str:
-    """Upload a base64 image to LinkedIn via Composio's INITIALIZE_IMAGE_UPLOAD and a direct PUT.
-    Returns the LinkedIn image URN (e.g., 'urn:li:image:C4E10AQF...').
+async def _linkedin_upload_image(user_id: str, author_urn: str, image_b64: str, mimetype: str) -> Dict[str, str]:
+    """Upload a base64 image into Composio's S3 so it can be referenced as a
+    LinkedIn post attachment via the file_uploadable schema. Returns the
+    image attachment dict expected by LINKEDIN_CREATE_LINKED_IN_POST.
     """
-    import asyncio, base64
-    def _init():
-        client = _composio_client()
-        return client.tools.execute(
-            user_id=user_id,
-            slug="LINKEDIN_INITIALIZE_IMAGE_UPLOAD",
-            arguments={"owner": author_urn},
-            dangerously_skip_version_check=True,
-        )
-    init = await asyncio.to_thread(_init)
-    raw: Any = init.data if hasattr(init, "data") else (init.get("data") if isinstance(init, dict) else init)
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=502, detail=f"LinkedIn upload init returned unexpected shape: {type(raw)}")
-    # The actual LinkedIn API response is usually under 'value' or 'response_data'
-    payload = raw.get("response_data") or raw.get("value") or raw
-    if isinstance(payload, dict) and "value" in payload and isinstance(payload["value"], dict):
-        payload = payload["value"]
-    upload_url = payload.get("uploadUrl") or payload.get("upload_url") or payload.get("uploadURL")
-    image_urn = payload.get("image") or payload.get("imageUrn") or payload.get("image_urn") or payload.get("asset")
-    if not upload_url or not image_urn:
-        logger.error(f"LinkedIn upload init payload missing fields: {str(payload)[:600]}")
-        raise HTTPException(status_code=502, detail="LinkedIn did not return an upload URL")
+    import asyncio, base64, tempfile, os
+    from composio.core.models._files import FileUploadable
+
+    ext = "jpg" if "jpeg" in (mimetype or "") else ((mimetype or "image/png").split("/")[-1] or "png")
     img_bytes = base64.b64decode(image_b64)
-    async with httpx.AsyncClient(timeout=30.0) as http_client:
-        put = await http_client.put(
-            upload_url,
-            content=img_bytes,
-            headers={"Content-Type": mimetype or "image/png"},
-        )
-        if put.status_code >= 300:
-            raise HTTPException(status_code=502, detail=f"LinkedIn image PUT failed: {put.status_code}")
-    return image_urn
+
+    def _do_upload() -> Dict[str, str]:
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
+                f.write(img_bytes)
+                tmp_path = f.name
+            client = _composio_client()
+            fu = FileUploadable.from_path(
+                client=client.client,
+                file=tmp_path,
+                tool="LINKEDIN_CREATE_LINKED_IN_POST",
+                toolkit="LINKEDIN",
+                file_upload_allowlist=None,
+            )
+            return {"name": f"repready-post.{ext}", "mimetype": fu.mimetype, "s3key": fu.s3key}
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    return await asyncio.to_thread(_do_upload)
 
 
 async def _linkedin_get_author_urn(user_id: str) -> str:
@@ -794,13 +792,8 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
         args: Dict[str, Any] = {"author": author_urn, "commentary": content}
         if image_b64:
             try:
-                image_urn = await _linkedin_upload_image(user_id, author_urn, image_b64, image_mime)
-                ext = "jpg" if "jpeg" in image_mime else (image_mime.split("/")[-1] or "png")
-                args["images"] = [{
-                    "name": f"repready-post.{ext}",
-                    "mimetype": image_mime,
-                    "s3key": image_urn,  # LinkedIn URN — Composio passes through as the asset reference
-                }]
+                image_attachment = await _linkedin_upload_image(user_id, author_urn, image_b64, image_mime)
+                args["images"] = [image_attachment]
             except HTTPException:
                 raise
             except Exception as e:
@@ -825,6 +818,12 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
         s = str(raw or "")
         if "<html" in s.lower() or "<!doctype" in s.lower():
             return f"{platform.capitalize()} rejected the request. Reconnect your account or check scopes."
+        if platform == "facebook" and ("page_id" in s or "Page" in s):
+            return ("Facebook requires posting to a Page (not a personal profile). "
+                    "We need to add a Page picker — coming soon.")
+        if platform == "instagram" and ("ig_user_id" in s or "creation_id" in s):
+            return ("Instagram requires a Business Account + a publicly-hosted image. "
+                    "We need to add image hosting + Business Account picker — coming soon.")
         s = re.sub(r"\s+", " ", s).strip()
         return s[:400]
 
