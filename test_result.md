@@ -140,7 +140,19 @@ frontend:
     status_history:
       - working: true
         agent: "main"
-        comment: "Replaced old Connect/Disconnect cards with per-platform blocks: shows all connected Composio accounts (display_name + status), a radio button to link/unlink each account to the currently-active company (calls /api/companies/{id}/link-account), a trash icon to delete individual accounts (/api/social/{platform}/accounts/{id}), and a + Connect / + Add button to add more accounts. Empty state ('No accounts connected yet') rendered correctly in screenshot."
+        comment: "Replaced old Connect/Disconnect cards with per-platform blocks. Empty state and rendering validated."
+
+  - task: "Companies CRUD UI — add/remove/switch/save multiple companies"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/(tabs)/settings.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "User reported: cannot add multiple companies. Root cause was a UX bug — the + Add chip was hidden when companies.length===0, and editing the name field overwrote the active company instead of creating a new one. Fixed by adding: (1) always-visible 'Add company' button that opens an inline create form with explicit name input + Create/Cancel buttons, (2) an EDITING banner showing the active company name + a trash-icon delete that opens an inline red-tinted confirm dialog with Cancel/Delete actions, (3) chips row always shown (with empty-state card when no companies), (4) form fields are disabled with a placeholder hint when no company is active, (5) after creating a new company, the form is cleared and ready for the new company's details. All four CRUD operations validated by screenshots: create empty, add 3 companies, switch active by tapping chip, delete with confirm. TestIDs: add-company-btn, new-company-name-input, new-company-save, new-company-cancel, delete-company-{id}, confirm-delete-confirm, confirm-delete-cancel."
 
   - task: "Generator screen routes to correct linked account"
     implemented: true

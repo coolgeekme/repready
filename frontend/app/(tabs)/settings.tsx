@@ -33,6 +33,11 @@ export default function Settings() {
   const [activeCompanyId, setActiveCompanyId] = useState<string | null>(null);
   const [accountsByPlatform, setAccountsByPlatform] = useState<Record<string, SocialAccount[]>>({});
   const [linkBusy, setLinkBusy] = useState<string | null>(null);
+  const [newCompanyMode, setNewCompanyMode] = useState(false);
+  const [newCompanyName, setNewCompanyName] = useState("");
+  const [savingNewCompany, setSavingNewCompany] = useState(false);
+  const [deletingCompanyId, setDeletingCompanyId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const activeCompany = companies.find((c) => c.id === activeCompanyId);
   const linkedFor = (platform: string): string | null =>
@@ -264,31 +269,68 @@ export default function Settings() {
     }
   };
 
-  const addCompany = async () => {
-    const name = (profile.company_name || "").trim();
+  const addCompany = async (nameArg?: string) => {
+    const name = (nameArg ?? newCompanyName ?? "").trim();
     if (!name) {
       setToast("Type a company name first");
       setTimeout(() => setToast(null), 1500);
       return;
     }
+    setSavingNewCompany(true);
     try {
-      const c = await api.createCompany({
-        name,
-        website: profile.company_website,
-        offerings: profile.company_offerings,
-        value_props: profile.company_value_props,
-        industry: profile.industry,
-        target_audience: profile.target_audience,
-      });
+      const c = await api.createCompany({ name });
       // Activate it server-side
       await api.activateCompany(c.id);
-      // Refresh local state from server (single source of truth)
+      // Refresh state from server
       await loadCompanies();
+      // Reset the new-company inline form & switch the editing form to the newly active company
+      setNewCompanyName("");
+      setNewCompanyMode(false);
+      setProfile((p: any) => ({
+        ...p,
+        company_name: c.name || "",
+        company_website: "",
+        company_offerings: "",
+        company_value_props: "",
+        target_audience: p?.target_audience || "",
+      }));
       setToast(`Added ${c.name}`);
       setTimeout(() => setToast(null), 1500);
     } catch (e: any) {
       setToast(`Add failed: ${(e?.message || "").slice(0, 80)}`);
       setTimeout(() => setToast(null), 2200);
+    } finally {
+      setSavingNewCompany(false);
+    }
+  };
+
+  const removeCompany = async (companyId: string) => {
+    setDeletingCompanyId(companyId);
+    try {
+      await api.deleteCompany(companyId);
+      // Refresh and pick the next active company from the refreshed list
+      const res = await api.listCompanies();
+      setCompanies(res.items || []);
+      const newActiveId = res.active_id || null;
+      setActiveCompanyId(newActiveId);
+      const next = (res.items || []).find((c: any) => c.id === newActiveId);
+      setProfile((p: any) => ({
+        ...p,
+        company_name: next?.name || "",
+        company_website: next?.website || "",
+        company_offerings: next?.offerings || "",
+        company_value_props: next?.value_props || "",
+        industry: next?.industry || p?.industry,
+        target_audience: next?.target_audience || p?.target_audience,
+      }));
+      setConfirmDeleteId(null);
+      setToast("Company removed");
+      setTimeout(() => setToast(null), 1500);
+    } catch (e: any) {
+      setToast(`Delete failed: ${(e?.message || "").slice(0, 80)}`);
+      setTimeout(() => setToast(null), 2200);
+    } finally {
+      setDeletingCompanyId(null);
     }
   };
 
@@ -397,41 +439,141 @@ export default function Settings() {
         </View>
         <Text style={styles.helper}>Switch between businesses. The active one drives every generation.</Text>
 
-        {companies.length > 0 && (
+        {/* Companies list — always shown, including empty state */}
+        {companies.length > 0 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
-            {companies.map((c) => (
-              <TouchableOpacity
-                key={c.id}
-                testID={`company-chip-${c.id}`}
-                onPress={() => activateCompany(c.id)}
-                style={[styles.chip, activeCompanyId === c.id && styles.chipActive]}
-              >
-                <Text style={[styles.chipText, activeCompanyId === c.id && styles.chipTextActive]}>{c.name}</Text>
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity testID="company-chip-add" onPress={addCompany} style={[styles.chip, { borderStyle: "dashed" }]}>
-              <Text style={[styles.chipText, { color: colors.primary }]}>+ Add</Text>
-            </TouchableOpacity>
+            {companies.map((c) => {
+              const isActive = activeCompanyId === c.id;
+              return (
+                <TouchableOpacity
+                  key={c.id}
+                  testID={`company-chip-${c.id}`}
+                  onPress={() => activateCompany(c.id)}
+                  onLongPress={() => setConfirmDeleteId(c.id)}
+                  style={[styles.chip, isActive && styles.chipActive]}
+                >
+                  <Text style={[styles.chipText, isActive && styles.chipTextActive]} numberOfLines={1}>{c.name}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </ScrollView>
+        ) : (
+          <View style={styles.emptyCompaniesCard}>
+            <Ionicons name="business-outline" size={20} color={colors.textSubtle} />
+            <Text style={styles.emptyCompaniesText}>No companies yet — add your first one below.</Text>
+          </View>
         )}
 
-        <Text style={styles.helper}>{activeCompanyId ? "Editing active company below:" : "Fill the fields below, then tap + Add to save as a new company."}</Text>
+        {/* Inline new-company form */}
+        {newCompanyMode ? (
+          <View style={styles.newCompanyCard}>
+            <Text style={styles.newCompanyLabel}>New company</Text>
+            <TextInput
+              testID="new-company-name-input"
+              style={styles.input}
+              value={newCompanyName}
+              onChangeText={setNewCompanyName}
+              placeholder="e.g. Acme Inc."
+              placeholderTextColor={colors.textSubtle}
+              autoFocus
+              onSubmitEditing={() => addCompany()}
+            />
+            <View style={styles.newCompanyBtnRow}>
+              <TouchableOpacity
+                testID="new-company-cancel"
+                style={[styles.newCompanyBtn, styles.newCompanyBtnGhost]}
+                onPress={() => { setNewCompanyMode(false); setNewCompanyName(""); }}
+                disabled={savingNewCompany}
+              >
+                <Text style={styles.newCompanyBtnGhostText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="new-company-save"
+                style={[styles.newCompanyBtn, styles.newCompanyBtnPrimary, (!newCompanyName.trim() || savingNewCompany) && { opacity: 0.5 }]}
+                onPress={() => addCompany()}
+                disabled={!newCompanyName.trim() || savingNewCompany}
+              >
+                {savingNewCompany ? <ActivityIndicator color="#fff" size="small" /> : (
+                  <Text style={styles.newCompanyBtnPrimaryText}>Create</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <TouchableOpacity
+            testID="add-company-btn"
+            style={styles.addCompanyBtn}
+            onPress={() => setNewCompanyMode(true)}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="add-circle-outline" size={18} color={colors.primary} />
+            <Text style={styles.addCompanyBtnText}>{companies.length === 0 ? "Add your first company" : "Add another company"}</Text>
+          </TouchableOpacity>
+        )}
+
+        {activeCompanyId && activeCompany && (
+          <View style={styles.editingBanner}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.editingLabel}>Editing</Text>
+              <Text style={styles.editingName} numberOfLines={1}>{activeCompany.name}</Text>
+            </View>
+            <TouchableOpacity
+              testID={`delete-company-${activeCompanyId}`}
+              style={styles.deleteCompanyBtn}
+              onPress={() => setConfirmDeleteId(activeCompanyId)}
+              hitSlop={6}
+            >
+              <Ionicons name="trash-outline" size={18} color={colors.error} />
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Confirm delete dialog (inline) */}
+        {confirmDeleteId && (
+          <View style={styles.confirmCard}>
+            <Text style={styles.confirmTitle}>Delete this company?</Text>
+            <Text style={styles.confirmDesc}>
+              “{companies.find((c) => c.id === confirmDeleteId)?.name || "this company"}” will be removed. Past generations stay in your library.
+            </Text>
+            <View style={styles.newCompanyBtnRow}>
+              <TouchableOpacity
+                testID="confirm-delete-cancel"
+                style={[styles.newCompanyBtn, styles.newCompanyBtnGhost]}
+                onPress={() => setConfirmDeleteId(null)}
+                disabled={!!deletingCompanyId}
+              >
+                <Text style={styles.newCompanyBtnGhostText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                testID="confirm-delete-confirm"
+                style={[styles.newCompanyBtn, styles.deleteConfirmBtn]}
+                onPress={() => removeCompany(confirmDeleteId)}
+                disabled={!!deletingCompanyId}
+              >
+                {deletingCompanyId ? <ActivityIndicator color="#fff" size="small" /> : (
+                  <Text style={styles.newCompanyBtnPrimaryText}>Delete</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         <Text style={styles.sectionLabel}>Company name</Text>
         <TextInput
           testID="settings-company-name"
-          style={styles.input}
+          style={[styles.input, !activeCompanyId && { opacity: 0.5 }]}
           value={profile.company_name || ""}
           onChangeText={(t) => setProfile({ ...profile, company_name: t })}
           onBlur={() => saveCompanyField({ company_name: profile.company_name || "" })}
-          placeholder="Acme Inc."
+          placeholder={activeCompanyId ? "Acme Inc." : "Create a company above first"}
           placeholderTextColor={colors.textSubtle}
+          editable={!!activeCompanyId}
         />
 
         <Text style={styles.sectionLabel}>Website (optional, recommended)</Text>
         <TextInput
           testID="settings-company-website"
-          style={styles.input}
+          style={[styles.input, !activeCompanyId && { opacity: 0.5 }]}
           value={profile.company_website || ""}
           onChangeText={(t) => setProfile({ ...profile, company_website: t })}
           onBlur={() => saveCompanyField({ company_website: profile.company_website || "" })}
@@ -439,6 +581,7 @@ export default function Settings() {
           placeholderTextColor={colors.textSubtle}
           autoCapitalize="none"
           keyboardType="url"
+          editable={!!activeCompanyId}
         />
 
         {/* AI Autofill */}
@@ -655,10 +798,35 @@ const styles = StyleSheet.create({
   autofillHelper: { color: colors.textMuted, fontSize: 12, marginTop: 6, lineHeight: 17 },
 
   chipsRow: { gap: 8, paddingRight: spacing.md },
-  chip: { paddingHorizontal: 14, height: 36, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  chip: { paddingHorizontal: 14, height: 36, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center", flexShrink: 0, maxWidth: 200 },
   chipActive: { borderColor: colors.primary, backgroundColor: "#EEF2FF" },
   chipText: { color: colors.textMuted, fontWeight: "600", fontSize: 13 },
   chipTextActive: { color: colors.primary },
+
+  emptyCompaniesCard: { flexDirection: "row", alignItems: "center", gap: 10, padding: spacing.md, borderWidth: 1, borderColor: colors.border, borderStyle: "dashed", borderRadius: radii.sm, backgroundColor: colors.surface, marginTop: 8 },
+  emptyCompaniesText: { color: colors.textMuted, fontSize: 13, flex: 1 },
+
+  addCompanyBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 14, marginTop: 10, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.primary, borderStyle: "dashed", backgroundColor: "#EEF2FF" },
+  addCompanyBtnText: { color: colors.primary, fontWeight: "700", fontSize: 14 },
+
+  newCompanyCard: { marginTop: 10, padding: spacing.md, borderWidth: 1, borderColor: colors.primary, borderRadius: radii.sm, backgroundColor: "#fff", gap: 10 },
+  newCompanyLabel: { color: colors.textSubtle, fontSize: 11, fontWeight: "700", letterSpacing: 2, textTransform: "uppercase" },
+  newCompanyBtnRow: { flexDirection: "row", gap: 8, justifyContent: "flex-end" },
+  newCompanyBtn: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: radii.sm, alignItems: "center", justifyContent: "center", minWidth: 88 },
+  newCompanyBtnPrimary: { backgroundColor: colors.primary },
+  newCompanyBtnPrimaryText: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  newCompanyBtnGhost: { borderWidth: 1, borderColor: colors.border, backgroundColor: "transparent" },
+  newCompanyBtnGhostText: { color: colors.text, fontWeight: "600", fontSize: 14 },
+  deleteConfirmBtn: { backgroundColor: colors.error },
+
+  editingBanner: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 12, paddingHorizontal: spacing.md, paddingVertical: 10, borderRadius: radii.sm, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  editingLabel: { color: colors.textSubtle, fontSize: 10, fontWeight: "700", letterSpacing: 1.8, textTransform: "uppercase" },
+  editingName: { color: colors.text, fontWeight: "700", fontSize: 14, marginTop: 2 },
+  deleteCompanyBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center", borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: "#fff" },
+
+  confirmCard: { marginTop: 10, padding: spacing.md, borderWidth: 1, borderColor: colors.error, borderRadius: radii.sm, backgroundColor: "#FEF2F2", gap: 8 },
+  confirmTitle: { color: colors.text, fontWeight: "800", fontSize: 15 },
+  confirmDesc: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
 
   input: { borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, paddingHorizontal: 14, paddingVertical: 14, fontSize: 15, color: colors.text, backgroundColor: "#fff" },
   textarea: { minHeight: 110, textAlignVertical: "top" },
