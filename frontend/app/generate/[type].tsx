@@ -349,7 +349,26 @@ function renderOutput(
   }
   if (t === "linkedin-post") {
     return (out.variations || []).map((v: any, i: number) => {
-      const full = `${v.body}\n\n${(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}`;
+      // Include the hook but avoid duplicating it if the body already starts with it
+      const hookText = String(v.hook || "").trim();
+      const bodyText = String(v.body || "").trim();
+      const normHook = hookText.toLowerCase().replace(/\s+/g, " ");
+      const normBody = bodyText.toLowerCase().replace(/\s+/g, " ");
+      const bodyStartsWithHook = hookText.length > 0 && (
+        normBody.startsWith(normHook) ||
+        normBody.startsWith(normHook.replace(/[?!.]+$/, ""))
+      );
+      const parts: string[] = [];
+      if (hookText) parts.push(hookText);
+      if (bodyText && !bodyStartsWithHook) parts.push(bodyText);
+      else if (bodyText && bodyStartsWithHook) {
+        // Body already contains the hook — keep body only, drop the leading hook line
+        parts.pop();
+        parts.push(bodyText);
+      }
+      const tagLine = (v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ");
+      if (tagLine) parts.push(tagLine);
+      const full = parts.join("\n\n");
       const img = imageMap?.[i];
       const renderPlatformBtn = (platform: "linkedin" | "facebook" | "instagram", icon: keyof typeof Ionicons.glyphMap, color: string, label: string) => {
         const key = `${platform}-${i}`;
