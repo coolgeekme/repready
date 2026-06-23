@@ -853,6 +853,49 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
         raise HTTPException(status_code=502, detail=clean)
 
 
+@api_router.post("/social/{platform}/disconnect")
+async def social_disconnect(platform: str, user_id: str = Depends(get_user_id)):
+    if platform not in SOCIAL_AUTH_CONFIGS:
+        raise HTTPException(status_code=404, detail="Unknown platform")
+    auth_config_id = _require_social_config(platform)
+
+    import asyncio
+    def _delete_all() -> int:
+        client = _composio_client()
+        listing = client.connected_accounts.list(
+            user_ids=[user_id],
+            auth_config_ids=[auth_config_id],
+        )
+        items = getattr(listing, "items", None) or list(listing or [])
+        count = 0
+        for item in items:
+            conn_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+            if not conn_id:
+                continue
+            try:
+                client.connected_accounts.delete(nanoid=conn_id)
+                count += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete {platform} connection {conn_id}: {e}")
+        return count
+
+    try:
+        deleted = await asyncio.to_thread(_delete_all)
+        # Clear cached fields on our user record
+        unset_fields: Dict[str, str] = {}
+        if platform == "linkedin":
+            unset_fields = {"linkedin_connection_id": "", "linkedin_connected": "", "linkedin_author_urn": ""}
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$unset": unset_fields, "$set": {"user_id": user_id, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+        return {"platform": platform, "deleted": deleted}
+    except Exception as e:
+        logger.error(f"Composio {platform} disconnect failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+
+
 # --- Legacy LinkedIn-specific endpoints (kept for the post button on result cards) ---
 @api_router.get("/composio/linkedin/status")
 async def linkedin_status_legacy(user_id: str = Depends(get_user_id)):

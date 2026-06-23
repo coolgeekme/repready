@@ -108,6 +108,21 @@ export default function Settings() {
     }
   };
 
+  const disconnectSocial = async (platform: "linkedin" | "facebook" | "instagram") => {
+    setConnecting(`disconnect-${platform}`);
+    try {
+      const res = await api.socialDisconnect(platform);
+      setSocials((m) => ({ ...m, [platform]: { connected: false, configured: true } }));
+      setToast(`${platform} disconnected${res?.deleted ? ` (${res.deleted})` : ""}`);
+      setTimeout(() => setToast(null), 1800);
+    } catch (e: any) {
+      setToast(`${platform} disconnect failed`);
+      setTimeout(() => setToast(null), 2000);
+    } finally {
+      setConnecting(null);
+    }
+  };
+
   const autofillCompany = async () => {
     if (!profile.company_name?.trim()) {
       setToast("Enter company name first");
@@ -309,6 +324,8 @@ export default function Settings() {
         {SOCIALS.map((s) => {
           const state = socials[s.key] || { connected: false };
           const notConfigured = state.configured === false;
+          const isDisconnecting = connecting === `disconnect-${s.key}`;
+          const isConnecting = connecting === s.key;
           return (
             <View key={s.key} style={styles.linkedinCard}>
               <Ionicons name={s.icon} size={22} color={s.color} />
@@ -320,18 +337,29 @@ export default function Settings() {
                   {notConfigured ? "Add an Auth Config in Composio dashboard." : `Post directly to ${s.label} from result cards.`}
                 </Text>
               </View>
-              <TouchableOpacity
-                testID={`settings-${s.key}-connect`}
-                style={[styles.smallBtn, state.connected && styles.smallBtnGhost, { backgroundColor: state.connected ? "transparent" : s.color }]}
-                onPress={() => connectSocial(s.key)}
-                disabled={connecting === s.key || notConfigured}
-              >
-                {connecting === s.key ? <ActivityIndicator color={state.connected ? colors.text : "#fff"} size="small" /> : (
-                  <Text style={[styles.smallBtnText, state.connected && { color: colors.text }]}>
-                    {state.connected ? "Reconnect" : "Connect"}
-                  </Text>
-                )}
-              </TouchableOpacity>
+              {state.connected ? (
+                <TouchableOpacity
+                  testID={`settings-${s.key}-disconnect`}
+                  style={[styles.smallBtn, styles.smallBtnGhost]}
+                  onPress={() => disconnectSocial(s.key)}
+                  disabled={isDisconnecting}
+                >
+                  {isDisconnecting ? <ActivityIndicator color={colors.text} size="small" /> : (
+                    <Text style={[styles.smallBtnText, { color: colors.error }]}>Disconnect</Text>
+                  )}
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  testID={`settings-${s.key}-connect`}
+                  style={[styles.smallBtn, { backgroundColor: s.color }]}
+                  onPress={() => connectSocial(s.key)}
+                  disabled={isConnecting || notConfigured}
+                >
+                  {isConnecting ? <ActivityIndicator color="#fff" size="small" /> : (
+                    <Text style={styles.smallBtnText}>Connect</Text>
+                  )}
+                </TouchableOpacity>
+              )}
             </View>
           );
         })}

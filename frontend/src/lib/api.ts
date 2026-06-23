@@ -59,6 +59,8 @@ export const api = {
     request<any>(`/social/${platform}/status`),
   socialConnect: (platform: string) =>
     request<any>(`/social/${platform}/connect`, { method: "POST" }),
+  socialDisconnect: (platform: string) =>
+    request<any>(`/social/${platform}/disconnect`, { method: "POST" }),
   socialPost: (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string }) =>
     request<any>(`/social/${platform}/post`, {
       method: "POST",
