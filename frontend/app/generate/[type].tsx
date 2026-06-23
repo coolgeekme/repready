@@ -16,7 +16,7 @@ const META: Record<GenType, { title: string; subtitle: string; backendType: stri
   "call-script": { title: "Call Script", subtitle: "2 openers + 3 discovery questions", backendType: "call-script", icon: "call-outline" },
   "company-intel": { title: "Company Intel", subtitle: "Personalization hooks for your target", backendType: "company-intel", icon: "search-outline" },
   "re-engagement": { title: "Re-Engagement", subtitle: "3 follow-up angles for cold prospects", backendType: "re-engagement", icon: "refresh-outline" },
-  "linkedin-post": { title: "LinkedIn Post", subtitle: "2 ready-to-post variations", backendType: "linkedin-post", icon: "logo-linkedin", canPostLinkedIn: true },
+  "linkedin-post": { title: "Social Post", subtitle: "2 ready-to-post variations", backendType: "linkedin-post", icon: "share-social-outline", canPostLinkedIn: true },
 };
 
 export default function GenerateScreen() {
@@ -312,7 +312,7 @@ function renderOutput(
   }
   if (t === "linkedin-post") {
     return (out.variations || []).map((v: any, i: number) => {
-      const full = `${v.hook}\n\n${v.body}\n\n${(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}`;
+      const full = `${v.body}\n\n${(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}`;
       const img = imageMap?.[i];
       const renderPlatformBtn = (platform: "linkedin" | "facebook" | "instagram", icon: keyof typeof Ionicons.glyphMap, color: string, label: string) => {
         const key = `${platform}-${i}`;

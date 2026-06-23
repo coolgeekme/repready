@@ -12,7 +12,7 @@ const TYPE_LABELS: Record<string, { label: string; icon: keyof typeof Ionicons.g
   call_script: { label: "Call Script", icon: "call-outline" },
   company_intel: { label: "Company Intel", icon: "search-outline" },
   re_engagement: { label: "Re-Engage", icon: "refresh-outline" },
-  linkedin_post: { label: "LinkedIn Post", icon: "logo-linkedin" },
+  linkedin_post: { label: "Social Post", icon: "share-social-outline" },
 };
 
 export default function History() {

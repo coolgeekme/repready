@@ -29,7 +29,7 @@ const TOOLS: Tool[] = [
   { key: "call-script", title: "Call Script", desc: "Openers + questions", icon: "call-outline", route: "/generate/call-script" },
   { key: "company-intel", title: "Company Intel", desc: "Personalization hooks", icon: "search-outline", route: "/generate/company-intel" },
   { key: "re-engagement", title: "Re-Engage", desc: "Follow-up angles", icon: "refresh-outline", route: "/generate/re-engagement" },
-  { key: "linkedin-post", title: "LinkedIn Post", desc: "Ready-to-post", icon: "logo-linkedin", route: "/generate/linkedin-post" },
+  { key: "linkedin-post", title: "Social Post", desc: "Ready-to-post", icon: "share-social-outline", route: "/generate/linkedin-post" },
 ];
 
 export default function Home() {

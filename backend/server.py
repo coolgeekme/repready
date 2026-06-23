@@ -58,7 +58,9 @@ class UserProfile(BaseModel):
     role: Optional[str] = None
     industry: Optional[str] = None
     target_audience: Optional[str] = None
-    # Company info (used as context in every generation)
+    # Active company reference (multi-company support)
+    active_company_id: Optional[str] = None
+    # Legacy fields preserved for backward compatibility
     company_name: Optional[str] = None
     company_website: Optional[str] = None
     company_offerings: Optional[str] = None
@@ -77,13 +79,29 @@ class ProfileUpdate(BaseModel):
     role: Optional[str] = None
     industry: Optional[str] = None
     target_audience: Optional[str] = None
-    company_name: Optional[str] = None
-    company_website: Optional[str] = None
-    company_offerings: Optional[str] = None
-    company_value_props: Optional[str] = None
+    active_company_id: Optional[str] = None
     guidelines_text: Optional[str] = None
     guidelines_file_name: Optional[str] = None
     guidelines_file_b64: Optional[str] = None
+
+
+class CompanyIn(BaseModel):
+    name: str
+    website: Optional[str] = None
+    offerings: Optional[str] = None
+    value_props: Optional[str] = None
+    industry: Optional[str] = None
+    target_audience: Optional[str] = None
+    guidelines_text: Optional[str] = None
+
+
+class ScheduledPostIn(BaseModel):
+    content: str
+    platforms: List[str]  # e.g. ["linkedin", "facebook"]
+    scheduled_for: str  # ISO datetime string
+    image_b64: Optional[str] = None
+    image_mime: Optional[str] = None
+    history_id: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -113,6 +131,45 @@ class HistoryItem(BaseModel):
 async def _get_profile(user_id: str) -> Dict[str, Any]:
     doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     return doc or {"user_id": user_id}
+
+
+async def _get_active_company(user_id: str) -> Optional[Dict[str, Any]]:
+    profile = await _get_profile(user_id)
+    company_id = profile.get("active_company_id")
+    if company_id:
+        c = await db.companies.find_one({"id": company_id, "user_id": user_id}, {"_id": 0})
+        if c:
+            return c
+    # Fallback: any company belonging to the user (most recent)
+    c = await db.companies.find_one({"user_id": user_id}, {"_id": 0}, sort=[("created_at", -1)])
+    if c and not profile.get("active_company_id"):
+        await db.users.update_one({"user_id": user_id}, {"$set": {"active_company_id": c["id"], "user_id": user_id}}, upsert=True)
+    return c
+
+
+async def _ensure_company_from_legacy(user_id: str) -> Optional[Dict[str, Any]]:
+    """If the user has legacy profile.company_name but no Company records, migrate."""
+    existing = await db.companies.find_one({"user_id": user_id}, {"_id": 0})
+    if existing:
+        return existing
+    profile = await _get_profile(user_id)
+    if not profile.get("company_name"):
+        return None
+    company = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "name": profile.get("company_name"),
+        "website": profile.get("company_website"),
+        "offerings": profile.get("company_offerings"),
+        "value_props": profile.get("company_value_props"),
+        "industry": profile.get("industry"),
+        "target_audience": profile.get("target_audience"),
+        "guidelines_text": profile.get("guidelines_text"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.companies.insert_one(dict(company))
+    await db.users.update_one({"user_id": user_id}, {"$set": {"active_company_id": company["id"]}}, upsert=True)
+    return company
 
 
 def _extract_json(text: str) -> Any:
@@ -193,24 +250,33 @@ async def _llm_generate_json(system_msg: str, user_msg: str) -> Any:
         raise HTTPException(status_code=502, detail="LLM did not return valid JSON")
 
 
-def _profile_context(profile: Dict[str, Any]) -> str:
+def _profile_context(profile: Dict[str, Any], company: Optional[Dict[str, Any]] = None) -> str:
     parts = []
     if profile.get("role"):
         parts.append(f"Sales Role: {profile['role']}")
-    if profile.get("industry"):
-        parts.append(f"Industry: {profile['industry']}")
-    if profile.get("company_name"):
-        parts.append(f"Company: {profile['company_name']}")
-    if profile.get("company_website"):
-        parts.append(f"Website: {profile['company_website']}")
-    if profile.get("company_offerings"):
-        parts.append(f"What the company sells / offerings:\n{profile['company_offerings'][:1500]}")
-    if profile.get("company_value_props"):
-        parts.append(f"Key value props / differentiators:\n{profile['company_value_props'][:1000]}")
-    if profile.get("target_audience"):
-        parts.append(f"Target Audience: {profile['target_audience']}")
-    if profile.get("guidelines_text"):
-        parts.append(f"Brand voice & guidelines:\n{profile['guidelines_text'][:1500]}")
+    # Prefer company-level data when present
+    c = company or {}
+    industry = c.get("industry") or profile.get("industry")
+    audience = c.get("target_audience") or profile.get("target_audience")
+    if industry:
+        parts.append(f"Industry: {industry}")
+    name = c.get("name") or profile.get("company_name")
+    website = c.get("website") or profile.get("company_website")
+    offerings = c.get("offerings") or profile.get("company_offerings")
+    value_props = c.get("value_props") or profile.get("company_value_props")
+    guidelines = c.get("guidelines_text") or profile.get("guidelines_text")
+    if name:
+        parts.append(f"Company: {name}")
+    if website:
+        parts.append(f"Website: {website}")
+    if offerings:
+        parts.append(f"What the company sells / offerings:\n{offerings[:1500]}")
+    if value_props:
+        parts.append(f"Key value props / differentiators:\n{value_props[:1000]}")
+    if audience:
+        parts.append(f"Target Audience: {audience}")
+    if guidelines:
+        parts.append(f"Brand voice & guidelines:\n{guidelines[:1500]}")
     if not parts:
         return "No profile context provided."
     return (
@@ -670,6 +736,105 @@ def _build_post_args(platform: str, content: str, image_url: Optional[str], auth
     return {}
 
 
+# ---------- Routes: Companies (multi-business) ----------
+@api_router.get("/companies")
+async def list_companies(user_id: str = Depends(get_user_id)):
+    await _ensure_company_from_legacy(user_id)
+    items = await db.companies.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    profile = await _get_profile(user_id)
+    return {"items": items, "active_id": profile.get("active_company_id")}
+
+
+@api_router.post("/companies")
+async def create_company(payload: CompanyIn, user_id: str = Depends(get_user_id)):
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    company = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "name": payload.name.strip(),
+        "website": payload.website,
+        "offerings": payload.offerings,
+        "value_props": payload.value_props,
+        "industry": payload.industry,
+        "target_audience": payload.target_audience,
+        "guidelines_text": payload.guidelines_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.companies.insert_one(dict(company))
+    profile = await _get_profile(user_id)
+    if not profile.get("active_company_id"):
+        await db.users.update_one({"user_id": user_id}, {"$set": {"active_company_id": company["id"], "user_id": user_id}}, upsert=True)
+    return company
+
+
+@api_router.put("/companies/{company_id}")
+async def update_company(company_id: str, payload: CompanyIn, user_id: str = Depends(get_user_id)):
+    update = {k: v for k, v in payload.dict().items() if v is not None}
+    res = await db.companies.update_one({"id": company_id, "user_id": user_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return await db.companies.find_one({"id": company_id, "user_id": user_id}, {"_id": 0})
+
+
+@api_router.delete("/companies/{company_id}")
+async def delete_company(company_id: str, user_id: str = Depends(get_user_id)):
+    res = await db.companies.delete_one({"id": company_id, "user_id": user_id})
+    profile = await _get_profile(user_id)
+    if profile.get("active_company_id") == company_id:
+        next_c = await db.companies.find_one({"user_id": user_id}, {"_id": 0}, sort=[("created_at", -1)])
+        await db.users.update_one({"user_id": user_id}, {"$set": {"active_company_id": next_c["id"] if next_c else None}}, upsert=True)
+    return {"deleted": res.deleted_count}
+
+
+@api_router.post("/companies/{company_id}/activate")
+async def activate_company(company_id: str, user_id: str = Depends(get_user_id)):
+    c = await db.companies.find_one({"id": company_id, "user_id": user_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="Company not found")
+    await db.users.update_one({"user_id": user_id}, {"$set": {"active_company_id": company_id, "user_id": user_id}}, upsert=True)
+    return {"active_id": company_id}
+
+
+# ---------- Routes: Scheduled Posts ----------
+@api_router.post("/scheduled")
+async def schedule_post(payload: ScheduledPostIn, user_id: str = Depends(get_user_id)):
+    try:
+        sched_dt = datetime.fromisoformat(payload.scheduled_for.replace("Z", "+00:00"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="scheduled_for must be ISO datetime")
+    item = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "content": payload.content,
+        "platforms": payload.platforms,
+        "image_b64": payload.image_b64,
+        "image_mime": payload.image_mime,
+        "history_id": payload.history_id,
+        "scheduled_for": sched_dt.isoformat(),
+        "status": "scheduled",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "results": [],
+    }
+    await db.scheduled_posts.insert_one(dict(item))
+    return {k: v for k, v in item.items() if k != "image_b64"}
+
+
+@api_router.get("/scheduled")
+async def list_scheduled(user_id: str = Depends(get_user_id)):
+    items = await db.scheduled_posts.find(
+        {"user_id": user_id},
+        {"_id": 0, "image_b64": 0},
+    ).sort("scheduled_for", 1).to_list(100)
+    return {"items": items}
+
+
+@api_router.delete("/scheduled/{sched_id}")
+async def cancel_scheduled(sched_id: str, user_id: str = Depends(get_user_id)):
+    res = await db.scheduled_posts.delete_one({"id": sched_id, "user_id": user_id, "status": "scheduled"})
+    return {"deleted": res.deleted_count}
+
+
 # ---------- Routes: Composio Social (LinkedIn / Facebook / Instagram) ----------
 def _composio_client():
     from composio import Composio
@@ -762,6 +927,7 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
     image_url = (payload.get("image_url") or "").strip() or None
     image_b64 = payload.get("image_b64") or None  # data URI or raw base64
     image_mime = (payload.get("image_mime") or "image/png").strip()
+    history_id = payload.get("history_id")
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
 
@@ -844,6 +1010,12 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
             msg = _humanize_provider_error(err_payload or result, platform)
             logger.error(f"Composio {platform} post failed (provider): {str(err_payload)[:500]}")
             raise HTTPException(status_code=502, detail=msg)
+        # Mark history item as posted to this platform
+        if history_id:
+            await db.history.update_one(
+                {"id": history_id, "user_id": user_id},
+                {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
+            )
         return {"success": True, "platform": platform, "with_image": bool(args.get("images") or image_b64 or image_url), "result": str(result)[:400]}
     except HTTPException:
         raise
@@ -894,6 +1066,68 @@ async def social_disconnect(platform: str, user_id: str = Depends(get_user_id)):
     except Exception as e:
         logger.error(f"Composio {platform} disconnect failed: {e}")
         raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+
+
+async def _execute_social_post(user_id: str, platform: str, content: str, image_b64: Optional[str], image_mime: Optional[str], history_id: Optional[str]) -> Dict[str, Any]:
+    """Internal helper that the scheduler & post endpoint both call."""
+    import asyncio
+    if platform not in SOCIAL_POST_TOOLS:
+        return {"platform": platform, "success": False, "error": "Unknown platform"}
+    if not SOCIAL_AUTH_CONFIGS.get(platform):
+        return {"platform": platform, "success": False, "error": f"{platform} not configured"}
+    if platform == "linkedin":
+        try:
+            author_urn = await _linkedin_get_author_urn(user_id)
+        except Exception as e:
+            return {"platform": platform, "success": False, "error": f"URN: {e}"}
+        args: Dict[str, Any] = {"author": author_urn, "commentary": content}
+        if image_b64:
+            try:
+                args["images"] = [await _linkedin_upload_image(user_id, author_urn, image_b64, image_mime or "image/png")]
+            except Exception as e:
+                logger.warning(f"Schedule image upload failed for linkedin: {e}")
+        slug = SOCIAL_POST_TOOLS[platform]["slug"]
+        def _exec():
+            client = _composio_client()
+            return client.tools.execute(user_id=user_id, slug=slug, arguments=args, dangerously_skip_version_check=True)
+        try:
+            await asyncio.to_thread(_exec)
+            if history_id:
+                await db.history.update_one(
+                    {"id": history_id, "user_id": user_id},
+                    {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
+                )
+            return {"platform": platform, "success": True}
+        except Exception as e:
+            return {"platform": platform, "success": False, "error": str(e)[:300]}
+    return {"platform": platform, "success": False, "error": f"{platform} posting not yet supported"}
+
+
+async def _scheduler_loop():
+    """Background task that checks for due scheduled posts every 60s."""
+    import asyncio
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            cursor = db.scheduled_posts.find({"status": "scheduled", "scheduled_for": {"$lte": now.isoformat()}})
+            async for doc in cursor:
+                doc_id = doc["id"]
+                await db.scheduled_posts.update_one({"id": doc_id}, {"$set": {"status": "posting"}})
+                results = []
+                for platform in doc.get("platforms", []):
+                    r = await _execute_social_post(
+                        doc["user_id"], platform, doc.get("content", ""),
+                        doc.get("image_b64"), doc.get("image_mime"), doc.get("history_id"),
+                    )
+                    results.append(r)
+                final_status = "posted" if all(r["success"] for r in results) else "failed"
+                await db.scheduled_posts.update_one(
+                    {"id": doc_id},
+                    {"$set": {"status": final_status, "results": results, "posted_at": datetime.now(timezone.utc).isoformat()}, "$unset": {"image_b64": ""}},
+                )
+        except Exception as e:
+            logger.error(f"Scheduler loop error: {e}")
+        await asyncio.sleep(60)
 
 
 # --- Legacy LinkedIn-specific endpoints (kept for the post button on result cards) ---
@@ -958,6 +1192,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _start_scheduler():
+    import asyncio
+    asyncio.create_task(_scheduler_loop())
 
 
 @app.on_event("shutdown")
