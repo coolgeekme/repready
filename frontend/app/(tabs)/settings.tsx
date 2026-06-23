@@ -13,6 +13,7 @@ const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
 
 type SocialState = { connected: boolean; configured?: boolean };
+type SocialAccount = { id: string; status?: string; display_name?: string; created_at?: string };
 const SOCIALS: { key: "linkedin" | "facebook" | "instagram"; label: string; icon: keyof typeof Ionicons.glyphMap; color: string }[] = [
   { key: "linkedin", label: "LinkedIn", icon: "logo-linkedin", color: "#0A66C2" },
   { key: "facebook", label: "Facebook", icon: "logo-facebook", color: "#1877F2" },
@@ -30,6 +31,25 @@ export default function Settings() {
   const [autoFilling, setAutoFilling] = useState(false);
   const [companies, setCompanies] = useState<any[]>([]);
   const [activeCompanyId, setActiveCompanyId] = useState<string | null>(null);
+  const [accountsByPlatform, setAccountsByPlatform] = useState<Record<string, SocialAccount[]>>({});
+  const [linkBusy, setLinkBusy] = useState<string | null>(null);
+
+  const activeCompany = companies.find((c) => c.id === activeCompanyId);
+  const linkedFor = (platform: string): string | null =>
+    (activeCompany?.linked_accounts && activeCompany.linked_accounts[platform]) || null;
+
+  const refreshAccounts = useCallback(async (platform: string) => {
+    try {
+      const res = await api.socialAccounts(platform);
+      setAccountsByPlatform((m) => ({ ...m, [platform]: res.accounts || [] }));
+    } catch (e) {
+      setAccountsByPlatform((m) => ({ ...m, [platform]: [] }));
+    }
+  }, []);
+
+  const refreshAllAccounts = useCallback(async () => {
+    await Promise.all(SOCIALS.map((s) => refreshAccounts(s.key)));
+  }, [refreshAccounts]);
 
   const loadCompanies = useCallback(async () => {
     try {
@@ -100,7 +120,7 @@ export default function Settings() {
     }
   }, []);
 
-  useEffect(() => { load(); loadCompanies(); }, [load, loadCompanies]);
+  useEffect(() => { load(); loadCompanies(); refreshAllAccounts(); }, [load, loadCompanies, refreshAllAccounts]);
 
   const save = async (patch: any) => {
     const next = { ...profile, ...patch };
@@ -148,9 +168,10 @@ export default function Settings() {
       } else if (res?.redirect_url) {
         await WebBrowser.openBrowserAsync(res.redirect_url);
       }
-      // Refresh status after returning
+      // Refresh status & accounts after returning
       const s = await api.socialStatus(platform);
       setSocials((m) => ({ ...m, [platform]: s }));
+      await refreshAccounts(platform);
     } catch (e: any) {
       const msg = e?.message || "";
       if (msg.includes("503")) {
@@ -171,11 +192,51 @@ export default function Settings() {
       setSocials((m) => ({ ...m, [platform]: { connected: false, configured: true } }));
       setToast(`${platform} disconnected${res?.deleted ? ` (${res.deleted})` : ""}`);
       setTimeout(() => setToast(null), 1800);
+      await refreshAccounts(platform);
+      await loadCompanies();
     } catch (e: any) {
       setToast(`${platform} disconnect failed`);
       setTimeout(() => setToast(null), 2000);
     } finally {
       setConnecting(null);
+    }
+  };
+
+  const deleteAccount = async (platform: "linkedin" | "facebook" | "instagram", accountId: string) => {
+    setLinkBusy(`delete-${platform}-${accountId}`);
+    try {
+      await api.deleteSocialAccount(platform, accountId);
+      await refreshAccounts(platform);
+      const s = await api.socialStatus(platform);
+      setSocials((m) => ({ ...m, [platform]: s }));
+      await loadCompanies();
+      setToast("Account removed");
+      setTimeout(() => setToast(null), 1500);
+    } catch (e: any) {
+      setToast("Remove failed");
+      setTimeout(() => setToast(null), 1800);
+    } finally {
+      setLinkBusy(null);
+    }
+  };
+
+  const linkAccount = async (platform: "linkedin" | "facebook" | "instagram", accountId: string | null) => {
+    if (!activeCompanyId) {
+      setToast("Pick an active company first");
+      setTimeout(() => setToast(null), 1500);
+      return;
+    }
+    setLinkBusy(`link-${platform}-${accountId || "none"}`);
+    try {
+      await api.linkAccountToCompany(activeCompanyId, platform, accountId);
+      await loadCompanies();
+      setToast(accountId ? `${platform} linked` : `${platform} unlinked`);
+      setTimeout(() => setToast(null), 1500);
+    } catch (e: any) {
+      setToast("Link failed");
+      setTimeout(() => setToast(null), 1800);
+    } finally {
+      setLinkBusy(null);
     }
   };
 
@@ -461,46 +522,97 @@ export default function Settings() {
           <Ionicons name="share-social-outline" size={16} color={colors.primary} />
           <Text style={styles.sectionHeaderText}>Social accounts</Text>
         </View>
-        <Text style={styles.helper}>Connect once, then post drafts straight from RepReady.</Text>
+        <Text style={styles.helper}>
+          Connect one or more accounts per network. The radio button picks which account
+          {activeCompany?.name ? ` "${activeCompany.name}"` : " the active company"} uses when posting.
+        </Text>
 
         {SOCIALS.map((s) => {
           const state = socials[s.key] || { connected: false };
           const notConfigured = state.configured === false;
-          const isDisconnecting = connecting === `disconnect-${s.key}`;
           const isConnecting = connecting === s.key;
+          const accounts = accountsByPlatform[s.key] || [];
+          const linkedId = linkedFor(s.key);
+          const activeAccounts = accounts.filter((a) => a.status === "ACTIVE" || !a.status);
           return (
-            <View key={s.key} style={styles.linkedinCard}>
-              <Ionicons name={s.icon} size={22} color={s.color} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.linkedinTitle}>
-                  {s.label} · {state.connected ? "Connected" : notConfigured ? "Not configured" : "Not connected"}
-                </Text>
-                <Text style={styles.linkedinDesc}>
-                  {notConfigured ? "Add an Auth Config in Composio dashboard." : `Post directly to ${s.label} from result cards.`}
-                </Text>
-              </View>
-              {state.connected ? (
-                <TouchableOpacity
-                  testID={`settings-${s.key}-disconnect`}
-                  style={[styles.smallBtn, styles.smallBtnGhost]}
-                  onPress={() => disconnectSocial(s.key)}
-                  disabled={isDisconnecting}
-                >
-                  {isDisconnecting ? <ActivityIndicator color={colors.text} size="small" /> : (
-                    <Text style={[styles.smallBtnText, { color: colors.error }]}>Disconnect</Text>
-                  )}
-                </TouchableOpacity>
-              ) : (
+            <View key={s.key} style={styles.platformBlock}>
+              <View style={styles.platformHeader}>
+                <Ionicons name={s.icon} size={22} color={s.color} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.platformTitle}>{s.label}</Text>
+                  <Text style={styles.platformSubtitle}>
+                    {notConfigured
+                      ? "Not configured in backend"
+                      : activeAccounts.length === 0
+                      ? "No accounts connected yet"
+                      : `${activeAccounts.length} account${activeAccounts.length === 1 ? "" : "s"} connected`}
+                  </Text>
+                </View>
                 <TouchableOpacity
                   testID={`settings-${s.key}-connect`}
-                  style={[styles.smallBtn, { backgroundColor: s.color }]}
+                  style={[styles.smallBtn, { backgroundColor: s.color }, notConfigured && { opacity: 0.5 }]}
                   onPress={() => connectSocial(s.key)}
                   disabled={isConnecting || notConfigured}
                 >
                   {isConnecting ? <ActivityIndicator color="#fff" size="small" /> : (
-                    <Text style={styles.smallBtnText}>Connect</Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                      <Ionicons name="add" size={14} color="#fff" />
+                      <Text style={styles.smallBtnText}>{activeAccounts.length === 0 ? "Connect" : "Add"}</Text>
+                    </View>
                   )}
                 </TouchableOpacity>
+              </View>
+
+              {activeAccounts.length > 0 && (
+                <View style={styles.accountsList}>
+                  {activeAccounts.map((a) => {
+                    const isLinked = linkedId === a.id;
+                    const linkKey = `link-${s.key}-${a.id}`;
+                    const delKey = `delete-${s.key}-${a.id}`;
+                    const linking = linkBusy === linkKey || linkBusy === `link-${s.key}-none`;
+                    const deleting = linkBusy === delKey;
+                    return (
+                      <View key={a.id} style={styles.accountRow}>
+                        <TouchableOpacity
+                          testID={`account-link-${s.key}-${a.id}`}
+                          style={styles.radioWrap}
+                          onPress={() => linkAccount(s.key, isLinked ? null : a.id)}
+                          disabled={linking || !activeCompanyId}
+                          activeOpacity={0.7}
+                        >
+                          <View style={[styles.radio, isLinked && styles.radioActive]}>
+                            {isLinked && <View style={styles.radioDot} />}
+                          </View>
+                        </TouchableOpacity>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.accountName} numberOfLines={1}>
+                            {a.display_name || `Account …${a.id.slice(-6)}`}
+                          </Text>
+                          <Text style={styles.accountMeta}>
+                            {isLinked
+                              ? `Used by ${activeCompany?.name || "active company"}`
+                              : a.status === "ACTIVE" ? "Active" : (a.status || "Connected")}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          testID={`account-delete-${s.key}-${a.id}`}
+                          style={styles.accountDelBtn}
+                          onPress={() => deleteAccount(s.key, a.id)}
+                          disabled={deleting}
+                          hitSlop={6}
+                        >
+                          {deleting ? <ActivityIndicator color={colors.error} size="small" /> : (
+                            <Ionicons name="trash-outline" size={16} color={colors.error} />
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+
+              {accounts.length === 0 && !notConfigured && state.connected === false && (
+                <Text style={styles.accountHint}>Tap “Connect” to authorise your first {s.label} account.</Text>
               )}
             </View>
           );
@@ -561,6 +673,21 @@ const styles = StyleSheet.create({
   smallBtn: { backgroundColor: colors.primary, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radii.sm },
   smallBtnGhost: { backgroundColor: "transparent", borderWidth: 1, borderColor: colors.border },
   smallBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+
+  platformBlock: { borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, backgroundColor: "#fff", marginTop: 10, overflow: "hidden" },
+  platformHeader: { flexDirection: "row", alignItems: "center", gap: 12, padding: spacing.md },
+  platformTitle: { fontWeight: "800", color: colors.text, fontSize: 15 },
+  platformSubtitle: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  accountsList: { borderTopWidth: 1, borderTopColor: colors.border },
+  accountRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: spacing.md, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border },
+  radioWrap: { width: 28, height: 28, alignItems: "center", justifyContent: "center" },
+  radio: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
+  radioActive: { borderColor: colors.primary },
+  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary },
+  accountName: { color: colors.text, fontWeight: "700", fontSize: 14 },
+  accountMeta: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
+  accountDelBtn: { width: 32, height: 32, alignItems: "center", justifyContent: "center", borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border },
+  accountHint: { color: colors.textSubtle, fontSize: 12, paddingHorizontal: spacing.md, paddingBottom: spacing.md, fontStyle: "italic" },
 
   signOut: { flexDirection: "row", alignItems: "center", gap: 8, justifyContent: "center", marginTop: spacing.xl, padding: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm },
   signOutText: { color: colors.error, fontWeight: "700" },

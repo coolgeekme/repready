@@ -1103,6 +1103,12 @@ async def _execute_social_post(user_id: str, platform: str, content: str, image_
     if not SOCIAL_AUTH_CONFIGS.get(platform):
         return {"platform": platform, "success": False, "error": f"{platform} not configured"}
     if platform == "linkedin":
+        # Use the company's chosen LinkedIn account if set
+        chosen_conn_id: Optional[str] = None
+        active_company = await _get_active_company(user_id)
+        if active_company:
+            linked = active_company.get("linked_accounts") or {}
+            chosen_conn_id = linked.get("linkedin")
         try:
             author_urn = await _linkedin_get_author_urn(user_id)
         except Exception as e:
@@ -1116,7 +1122,10 @@ async def _execute_social_post(user_id: str, platform: str, content: str, image_
         slug = SOCIAL_POST_TOOLS[platform]["slug"]
         def _exec():
             client = _composio_client()
-            return client.tools.execute(user_id=user_id, slug=slug, arguments=args, dangerously_skip_version_check=True)
+            kwargs: Dict[str, Any] = {"user_id": user_id, "slug": slug, "arguments": args, "dangerously_skip_version_check": True}
+            if chosen_conn_id:
+                kwargs["connected_account_id"] = chosen_conn_id
+            return client.tools.execute(**kwargs)
         try:
             await asyncio.to_thread(_exec)
             if history_id:

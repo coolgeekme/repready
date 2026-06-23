@@ -61,6 +61,15 @@ export const api = {
     request<any>(`/social/${platform}/connect`, { method: "POST" }),
   socialDisconnect: (platform: string) =>
     request<any>(`/social/${platform}/disconnect`, { method: "POST" }),
+  socialAccounts: (platform: string) =>
+    request<any>(`/social/${platform}/accounts`),
+  deleteSocialAccount: (platform: string, id: string) =>
+    request<any>(`/social/${platform}/accounts/${id}`, { method: "DELETE" }),
+  linkAccountToCompany: (companyId: string, platform: string, connected_account_id: string | null) =>
+    request<any>(`/companies/${companyId}/link-account`, {
+      method: "POST",
+      body: JSON.stringify({ platform, connected_account_id }),
+    }),
   socialPost: (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string }) =>
     request<any>(`/social/${platform}/post`, {
       method: "POST",
