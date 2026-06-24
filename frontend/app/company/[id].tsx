@@ -313,7 +313,7 @@ export default function CompanyDetail() {
       )}
 
       {toast && (
-        <View testID="company-toast" style={styles.toast} pointerEvents="none">
+        <View testID="company-toast" style={[styles.toast, { pointerEvents: "none" }]}>
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       )}

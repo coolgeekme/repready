@@ -4,7 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/contexts/AuthContext";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radii, spacing } from "@/src/theme";
@@ -12,49 +12,16 @@ import { colors, fonts, radii, spacing } from "@/src/theme";
 const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "Founder/CEO"];
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
 
-type SocialState = { connected: boolean; configured?: boolean };
-type SocialAccount = { id: string; status?: string; display_name?: string; created_at?: string };
-const SOCIALS: { key: "linkedin" | "facebook" | "instagram"; label: string; icon: keyof typeof Ionicons.glyphMap; color: string }[] = [
-  { key: "linkedin", label: "LinkedIn", icon: "logo-linkedin", color: "#0A66C2" },
-  { key: "facebook", label: "Facebook", icon: "logo-facebook", color: "#1877F2" },
-  { key: "instagram", label: "Instagram", icon: "logo-instagram", color: "#E1306C" },
-];
-
 export default function Settings() {
   const { user, signOutUser } = useAuth();
   const [profile, setProfile] = useState<any>({});
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [socials, setSocials] = useState<Record<string, SocialState>>({});
-  const [connecting, setConnecting] = useState<string | null>(null);
-  const [autoFilling, setAutoFilling] = useState(false);
   const [companies, setCompanies] = useState<any[]>([]);
   const [activeCompanyId, setActiveCompanyId] = useState<string | null>(null);
-  const [accountsByPlatform, setAccountsByPlatform] = useState<Record<string, SocialAccount[]>>({});
-  const [linkBusy, setLinkBusy] = useState<string | null>(null);
   const [newCompanyMode, setNewCompanyMode] = useState(false);
   const [newCompanyName, setNewCompanyName] = useState("");
   const [savingNewCompany, setSavingNewCompany] = useState(false);
-  const [deletingCompanyId, setDeletingCompanyId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-
-  const activeCompany = companies.find((c) => c.id === activeCompanyId);
-  const linkedFor = (platform: string): string | null =>
-    (activeCompany?.linked_accounts && activeCompany.linked_accounts[platform]) || null;
-
-  const refreshAccounts = useCallback(async (platform: string) => {
-    try {
-      const res = await api.socialAccounts(platform);
-      setAccountsByPlatform((m) => ({ ...m, [platform]: res.accounts || [] }));
-    } catch (e) {
-      setAccountsByPlatform((m) => ({ ...m, [platform]: [] }));
-    }
-  }, []);
-
-  const refreshAllAccounts = useCallback(async () => {
-    await Promise.all(SOCIALS.map((s) => refreshAccounts(s.key)));
-  }, [refreshAccounts]);
 
   const loadCompanies = useCallback(async () => {
     try {
@@ -79,37 +46,6 @@ export default function Settings() {
     } catch (e) {}
   }, []);
 
-  // Save changes to the company record (or fall back to profile if no active company)
-  const saveCompanyField = async (patch: any) => {
-    setProfile((p: any) => ({ ...p, ...patch }));
-    try {
-      if (activeCompanyId) {
-        const mapped: any = {};
-        if (patch.company_name !== undefined) mapped.name = patch.company_name;
-        if (patch.company_website !== undefined) mapped.website = patch.company_website;
-        if (patch.company_offerings !== undefined) mapped.offerings = patch.company_offerings;
-        if (patch.company_value_props !== undefined) mapped.value_props = patch.company_value_props;
-        if (patch.industry !== undefined) mapped.industry = patch.industry;
-        if (patch.target_audience !== undefined) mapped.target_audience = patch.target_audience;
-        if (Object.keys(mapped).length > 0) {
-          // Need the company name to be present for the schema
-          const current = companies.find((c) => c.id === activeCompanyId) || {};
-          mapped.name = mapped.name ?? current.name ?? "";
-          if (!mapped.name) return; // can't save without a name
-          await api.updateCompany(activeCompanyId, mapped);
-          await loadCompanies();
-        }
-      } else {
-        await api.updateProfile(patch);
-      }
-      setToast("Saved");
-      setTimeout(() => setToast(null), 1200);
-    } catch (e) {
-      setToast("Save failed");
-      setTimeout(() => setToast(null), 1500);
-    }
-  };
-
   const load = useCallback(async () => {
     try {
       const p = await api.getProfile();
@@ -121,10 +57,16 @@ export default function Settings() {
 
   useEffect(() => { load(); loadCompanies(); }, [load, loadCompanies]);
 
+  // Refresh companies every time the tab regains focus (e.g. after deleting/editing on detail page)
+  useFocusEffect(
+    useCallback(() => {
+      loadCompanies();
+    }, [loadCompanies])
+  );
+
   const save = async (patch: any) => {
     const next = { ...profile, ...patch };
     setProfile(next);
-    setSaving(true);
     try {
       await api.updateProfile(patch);
       setToast("Saved");
@@ -132,8 +74,6 @@ export default function Settings() {
     } catch (e) {
       setToast("Save failed");
       setTimeout(() => setToast(null), 1400);
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -153,112 +93,6 @@ export default function Settings() {
       reader.readAsDataURL(blob);
     } catch (e) {
       setToast("Upload failed");
-      setTimeout(() => setToast(null), 1500);
-    }
-  };
-
-  const connectSocial = async (platform: "linkedin" | "facebook" | "instagram") => {
-    setConnecting(platform);
-    try {
-      const res = await api.socialConnect(platform);
-      if (res?.already_connected) {
-        setToast(`${platform} already connected`);
-        setTimeout(() => setToast(null), 1500);
-      } else if (res?.redirect_url) {
-        await WebBrowser.openBrowserAsync(res.redirect_url);
-      }
-      // Refresh status & accounts after returning
-      const s = await api.socialStatus(platform);
-      setSocials((m) => ({ ...m, [platform]: s }));
-      await refreshAccounts(platform);
-    } catch (e: any) {
-      const msg = e?.message || "";
-      if (msg.includes("503")) {
-        setToast(`${platform} not configured`);
-      } else {
-        setToast(`${platform} connect failed`);
-      }
-      setTimeout(() => setToast(null), 2500);
-    } finally {
-      setConnecting(null);
-    }
-  };
-
-  const disconnectSocial = async (platform: "linkedin" | "facebook" | "instagram") => {
-    setConnecting(`disconnect-${platform}`);
-    try {
-      const res = await api.socialDisconnect(platform);
-      setSocials((m) => ({ ...m, [platform]: { connected: false, configured: true } }));
-      setToast(`${platform} disconnected${res?.deleted ? ` (${res.deleted})` : ""}`);
-      setTimeout(() => setToast(null), 1800);
-      await refreshAccounts(platform);
-      await loadCompanies();
-    } catch (e: any) {
-      setToast(`${platform} disconnect failed`);
-      setTimeout(() => setToast(null), 2000);
-    } finally {
-      setConnecting(null);
-    }
-  };
-
-  const deleteAccount = async (platform: "linkedin" | "facebook" | "instagram", accountId: string) => {
-    setLinkBusy(`delete-${platform}-${accountId}`);
-    try {
-      await api.deleteSocialAccount(platform, accountId);
-      await refreshAccounts(platform);
-      const s = await api.socialStatus(platform);
-      setSocials((m) => ({ ...m, [platform]: s }));
-      await loadCompanies();
-      setToast("Account removed");
-      setTimeout(() => setToast(null), 1500);
-    } catch (e: any) {
-      setToast("Remove failed");
-      setTimeout(() => setToast(null), 1800);
-    } finally {
-      setLinkBusy(null);
-    }
-  };
-
-  const linkAccount = async (platform: "linkedin" | "facebook" | "instagram", accountId: string | null) => {
-    if (!activeCompanyId) {
-      setToast("Pick an active company first");
-      setTimeout(() => setToast(null), 1500);
-      return;
-    }
-    setLinkBusy(`link-${platform}-${accountId || "none"}`);
-    try {
-      await api.linkAccountToCompany(activeCompanyId, platform, accountId);
-      await loadCompanies();
-      setToast(accountId ? `${platform} linked` : `${platform} unlinked`);
-      setTimeout(() => setToast(null), 1500);
-    } catch (e: any) {
-      setToast("Link failed");
-      setTimeout(() => setToast(null), 1800);
-    } finally {
-      setLinkBusy(null);
-    }
-  };
-
-  const activateCompany = async (id: string) => {
-    try {
-      await api.activateCompany(id);
-      setActiveCompanyId(id);
-      const c = companies.find((x) => x.id === id);
-      if (c) {
-        setProfile((p: any) => ({
-          ...p,
-          company_name: c.name || "",
-          company_website: c.website || "",
-          company_offerings: c.offerings || "",
-          company_value_props: c.value_props || "",
-          industry: c.industry || p?.industry,
-          target_audience: c.target_audience || p?.target_audience,
-        }));
-      }
-      setToast("Active company switched");
-      setTimeout(() => setToast(null), 1500);
-    } catch (e) {
-      setToast("Switch failed");
       setTimeout(() => setToast(null), 1500);
     }
   };
@@ -284,117 +118,6 @@ export default function Settings() {
       setTimeout(() => setToast(null), 2200);
     } finally {
       setSavingNewCompany(false);
-    }
-  };
-
-  const addCompany = async (nameArg?: string) => {
-    const name = (nameArg ?? newCompanyName ?? "").trim();
-    if (!name) {
-      setToast("Type a company name first");
-      setTimeout(() => setToast(null), 1500);
-      return;
-    }
-    setSavingNewCompany(true);
-    try {
-      const c = await api.createCompany({ name });
-      // Activate it server-side
-      await api.activateCompany(c.id);
-      // Refresh state from server
-      await loadCompanies();
-      // Reset the new-company inline form & switch the editing form to the newly active company
-      setNewCompanyName("");
-      setNewCompanyMode(false);
-      setProfile((p: any) => ({
-        ...p,
-        company_name: c.name || "",
-        company_website: "",
-        company_offerings: "",
-        company_value_props: "",
-        target_audience: p?.target_audience || "",
-      }));
-      setToast(`Added ${c.name}`);
-      setTimeout(() => setToast(null), 1500);
-    } catch (e: any) {
-      setToast(`Add failed: ${(e?.message || "").slice(0, 80)}`);
-      setTimeout(() => setToast(null), 2200);
-    } finally {
-      setSavingNewCompany(false);
-    }
-  };
-
-  const removeCompany = async (companyId: string) => {
-    setDeletingCompanyId(companyId);
-    try {
-      await api.deleteCompany(companyId);
-      // Refresh and pick the next active company from the refreshed list
-      const res = await api.listCompanies();
-      setCompanies(res.items || []);
-      const newActiveId = res.active_id || null;
-      setActiveCompanyId(newActiveId);
-      const next = (res.items || []).find((c: any) => c.id === newActiveId);
-      setProfile((p: any) => ({
-        ...p,
-        company_name: next?.name || "",
-        company_website: next?.website || "",
-        company_offerings: next?.offerings || "",
-        company_value_props: next?.value_props || "",
-        industry: next?.industry || p?.industry,
-        target_audience: next?.target_audience || p?.target_audience,
-      }));
-      setConfirmDeleteId(null);
-      setToast("Company removed");
-      setTimeout(() => setToast(null), 1500);
-    } catch (e: any) {
-      setToast(`Delete failed: ${(e?.message || "").slice(0, 80)}`);
-      setTimeout(() => setToast(null), 2200);
-    } finally {
-      setDeletingCompanyId(null);
-    }
-  };
-
-  const autofillCompany = async () => {
-    const name = (profile.company_name || "").trim();
-    if (!name) {
-      setToast("Enter company name first");
-      setTimeout(() => setToast(null), 1500);
-      return;
-    }
-    setAutoFilling(true);
-    setToast(`Researching ${name}… (5-15s)`);
-    try {
-      const res = await api.companyAutofill(name, profile.company_website);
-      const patch = {
-        company_offerings: res.company_offerings || profile.company_offerings || "",
-        company_value_props: res.company_value_props || profile.company_value_props || "",
-        industry: res.industry || profile.industry,
-        target_audience: res.target_audience || profile.target_audience,
-      };
-      // Update local form immediately so the user sees the fields fill in
-      setProfile((p: any) => ({ ...p, ...patch }));
-      // Persist to the active company (or profile fallback) — uses single source of truth
-      if (activeCompanyId) {
-        const current = companies.find((c) => c.id === activeCompanyId);
-        await api.updateCompany(activeCompanyId, {
-          name: current?.name || name,
-          website: profile.company_website || undefined,
-          offerings: patch.company_offerings || undefined,
-          value_props: patch.company_value_props || undefined,
-          industry: patch.industry || undefined,
-          target_audience: patch.target_audience || undefined,
-        });
-        await loadCompanies();
-      } else {
-        await api.updateProfile(patch);
-      }
-      setToast(res.fetched_site ? "✓ Auto-filled from site" : "✓ Auto-filled (no site reached)");
-      setTimeout(() => setToast(null), 2500);
-    } catch (e: any) {
-      const msg = (e?.message || "").slice(0, 140);
-      console.warn("Auto-fill failed:", e);
-      setToast(`Auto-fill failed: ${msg || "try again"}`);
-      setTimeout(() => setToast(null), 4500);
-    } finally {
-      setAutoFilling(false);
     }
   };
 
