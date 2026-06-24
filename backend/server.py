@@ -327,7 +327,8 @@ async def update_profile(payload: ProfileUpdate, user_id: str = Depends(get_user
 # ---------- Routes: Generators ----------
 async def _generate(user_id: str, type_: str, schema_hint: str, prompt: str, req: GenerateRequest, title: str) -> Dict:
     profile = await _get_profile(user_id)
-    context = _profile_context(profile)
+    company = await _get_active_company(user_id) or await _ensure_company_from_legacy(user_id)
+    context = _profile_context(profile, company)
     system = (
         "You are RepReady, an elite sales enablement assistant. You craft concise, "
         "high-conversion, human-sounding sales content. Avoid clichés, avoid hype. "
@@ -345,7 +346,14 @@ Return strictly this JSON schema (no explanations):
 """
     output = await _llm_generate_json(system, user_msg)
     item = await _save_history(user_id, type_, title, req.dict(), {"data": output})
-    return {"id": item["id"], "type": type_, "title": title, "output": output, "created_at": item["created_at"]}
+    return {
+        "id": item["id"],
+        "type": type_,
+        "title": title,
+        "output": output,
+        "created_at": item["created_at"],
+        "active_company": {"id": company.get("id"), "name": company.get("name")} if company else None,
+    }
 
 
 @api_router.post("/generate/cold-email")
@@ -596,7 +604,8 @@ class ImageRequest(BaseModel):
 @api_router.post("/generate/post-image")
 async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_user_id)):
     profile = await _get_profile(user_id)
-    industry = profile.get("industry") or "business"
+    company = await _get_active_company(user_id) or await _ensure_company_from_legacy(user_id)
+    industry = (company.get("industry") if company else None) or profile.get("industry") or "business"
     style = payload.style or "modern editorial photo, soft natural light, shallow depth of field, professional, high contrast"
 
     if payload.prompt:
@@ -759,6 +768,8 @@ async def generate_topic_ideas(payload: Dict[str, Any], user_id: str = Depends(g
         f"Return strictly this JSON:\n{schema}"
     )
     data = await _llm_generate_json(system, user_msg)
+    if isinstance(data, dict):
+        data["active_company"] = {"id": company.get("id"), "name": company.get("name")} if company else None
     return data
 
 

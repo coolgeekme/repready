@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Image } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import { api } from "@/src/lib/api";
@@ -37,6 +37,23 @@ export default function GenerateScreen() {
   const [scheduleMap, setScheduleMap] = useState<Record<number, { datetime: string; show: boolean; saving: boolean }>>({});
   const [topicIdeas, setTopicIdeas] = useState<any[] | null>(null);
   const [topicLoading, setTopicLoading] = useState(false);
+  const [activeCompany, setActiveCompany] = useState<{ id: string; name: string; offerings?: string; value_props?: string; industry?: string; target_audience?: string; website?: string } | null>(null);
+
+  const loadActiveCompany = useCallback(async () => {
+    try {
+      const res = await api.listCompanies();
+      const active = (res.items || []).find((c: any) => c.id === res.active_id);
+      setActiveCompany(active || null);
+    } catch (e: any) {
+      setActiveCompany(null);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadActiveCompany();
+    }, [loadActiveCompany])
+  );
 
   useEffect(() => {
     if (historyId) {
@@ -182,6 +199,46 @@ export default function GenerateScreen() {
         bottomOffset={80}
       >
         <Text style={styles.subtitle}>{meta.subtitle}</Text>
+
+        {/* Active company context banner — shows which business this generation will use */}
+        {activeCompany ? (
+          <TouchableOpacity
+            testID="active-company-banner"
+            style={styles.companyBanner}
+            onPress={() => router.push(`/company/${activeCompany.id}`)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.companyBannerIcon}>
+              <Ionicons name="business" size={16} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.companyBannerLabel}>USING CONTEXT FROM</Text>
+              <Text style={styles.companyBannerName} numberOfLines={1}>{activeCompany.name}</Text>
+              {(() => {
+                const missing: string[] = [];
+                if (!activeCompany.offerings) missing.push("offerings");
+                if (!activeCompany.value_props) missing.push("value props");
+                if (!activeCompany.industry) missing.push("industry");
+                if (!activeCompany.target_audience) missing.push("audience");
+                if (missing.length === 0) {
+                  return <Text style={styles.companyBannerMeta}>✓ Full context loaded</Text>;
+                }
+                return <Text style={styles.companyBannerWarn}>Missing: {missing.join(", ")} · tap to fill</Text>;
+              })()}
+            </View>
+            <Ionicons name="swap-horizontal" size={18} color={colors.textSubtle} />
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            testID="active-company-empty"
+            style={styles.companyBannerEmpty}
+            onPress={() => router.push("/(tabs)/settings")}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="warning-outline" size={16} color={colors.error} />
+            <Text style={styles.companyBannerEmptyText}>No active company — set one up in Settings for personalized output.</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Topic suggester (only for Social Post) */}
         {t === "linkedin-post" && (
@@ -632,4 +689,13 @@ const styles = StyleSheet.create({
   error: { color: colors.error, fontSize: 13, marginBottom: 8 },
   toast: { position: "absolute", left: 0, right: 0, alignItems: "center" },
   toastText: { backgroundColor: colors.black, color: "#fff", paddingHorizontal: 16, paddingVertical: 10, borderRadius: radii.sm, fontWeight: "600", overflow: "hidden" },
+
+  companyBanner: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, marginBottom: spacing.md, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.primary, backgroundColor: "#EEF2FF" },
+  companyBannerIcon: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
+  companyBannerLabel: { color: colors.primary, fontSize: 9, fontWeight: "800", letterSpacing: 1.5 },
+  companyBannerName: { color: colors.text, fontWeight: "800", fontSize: 14, marginTop: 1 },
+  companyBannerMeta: { color: "#16a34a", fontSize: 11, fontWeight: "600", marginTop: 2 },
+  companyBannerWarn: { color: colors.error, fontSize: 11, fontWeight: "600", marginTop: 2 },
+  companyBannerEmpty: { flexDirection: "row", alignItems: "center", gap: 8, padding: 12, marginBottom: spacing.md, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.error, borderStyle: "dashed", backgroundColor: "#FEF2F2" },
+  companyBannerEmptyText: { color: colors.error, fontSize: 12, fontWeight: "600", flex: 1 },
 });
