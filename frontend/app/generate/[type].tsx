@@ -7,6 +7,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Clipboard from "expo-clipboard";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radii, spacing } from "@/src/theme";
+import SchedulerModal from "@/src/components/SchedulerModal";
 
 type GenType = "cold-email" | "objection" | "call-script" | "company-intel" | "re-engagement" | "linkedin-post";
 
@@ -34,10 +35,13 @@ export default function GenerateScreen() {
   const [posting, setPosting] = useState<string | null>(null);
   const [imageMap, setImageMap] = useState<Record<number, { uri: string; loading?: boolean; error?: string }>>({});
   const [imagePromptMap, setImagePromptMap] = useState<Record<number, string>>({});
-  const [scheduleMap, setScheduleMap] = useState<Record<number, { datetime: string; show: boolean; saving: boolean }>>({});
   const [topicIdeas, setTopicIdeas] = useState<any[] | null>(null);
   const [topicLoading, setTopicLoading] = useState(false);
-  const [activeCompany, setActiveCompany] = useState<{ id: string; name: string; offerings?: string; value_props?: string; industry?: string; target_audience?: string; website?: string } | null>(null);
+  const [activeCompany, setActiveCompany] = useState<{ id: string; name: string; offerings?: string; value_props?: string; industry?: string; target_audience?: string; website?: string; linked_accounts?: Record<string, string> } | null>(null);
+  // Scheduler modal state
+  const [schedulerIdx, setSchedulerIdx] = useState<number | null>(null);
+  const [scheduling, setScheduling] = useState(false);
+  const [scheduledIdx, setScheduledIdx] = useState<Set<number>>(new Set());
 
   const loadActiveCompany = useCallback(async () => {
     try {
@@ -151,13 +155,8 @@ export default function GenerateScreen() {
     }
   };
 
-  const schedulePost = async (idx: number, content: string) => {
-    const entry = scheduleMap[idx];
-    if (!entry?.datetime) {
-      setErr("Pick a date and time first");
-      return;
-    }
-    setScheduleMap((m) => ({ ...m, [idx]: { ...entry, saving: true } }));
+  const handleScheduleConfirm = async (idx: number, content: string, isoDatetime: string, platforms: string[]) => {
+    setScheduling(true);
     try {
       const img = imageMap[idx];
       let image_b64: string | undefined;
@@ -168,14 +167,23 @@ export default function GenerateScreen() {
         const mm = /data:([^;]+);base64/.exec(head);
         image_mime = mm?.[1] || "image/png";
       }
-      const sched = new Date(entry.datetime).toISOString();
-      await api.schedulePost({ content, platforms: ["linkedin"], scheduled_for: sched, image_b64, image_mime });
-      setToast("Scheduled ✓");
-      setTimeout(() => setToast(null), 1800);
-      setScheduleMap((m) => ({ ...m, [idx]: { datetime: "", show: false, saving: false } }));
+      await api.schedulePost({
+        content,
+        platforms,
+        scheduled_for: isoDatetime,
+        image_b64,
+        image_mime,
+      });
+      setScheduledIdx((s) => new Set(s).add(idx));
+      setSchedulerIdx(null);
+      const when = new Date(isoDatetime);
+      setToast(`✓ Scheduled for ${when.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`);
+      setTimeout(() => setToast(null), 3500);
     } catch (e: any) {
-      setErr(`Schedule failed. ${(e?.message || "").slice(0, 120)}`);
-      setScheduleMap((m) => ({ ...m, [idx]: { ...entry, saving: false } }));
+      // Throw so modal can display the error
+      throw e;
+    } finally {
+      setScheduling(false);
     }
   };
 
@@ -317,13 +325,39 @@ export default function GenerateScreen() {
               imageMap,
               imagePromptMap,
               setImagePromptMap,
-              scheduleMap,
-              setScheduleMap,
-              meta.canPostLinkedIn ? schedulePost : undefined,
+              scheduledIdx,
+              meta.canPostLinkedIn ? (i: number) => setSchedulerIdx(i) : undefined,
             )}
           </View>
         )}
       </KeyboardAwareScrollView>
+
+      {/* Scheduler modal */}
+      {schedulerIdx !== null && (
+        <SchedulerModal
+          visible={schedulerIdx !== null}
+          onClose={() => setSchedulerIdx(null)}
+          onConfirm={async (iso, plats) => {
+            const variants = output?.variations || [];
+            const v = variants[schedulerIdx!];
+            const content = v ? `${v.hook}\n\n${v.body}\n\n${v.hashtags || ""}`.trim() : "";
+            await handleScheduleConfirm(schedulerIdx!, content, iso, plats);
+          }}
+          contentPreview={(() => {
+            const v = output?.variations?.[schedulerIdx];
+            return v?.hook || "";
+          })()}
+          linkedPlatforms={(() => {
+            const linked = activeCompany?.linked_accounts || {};
+            return (["linkedin", "facebook", "instagram"] as const).filter((p) => !!linked[p]);
+          })()}
+          defaultPlatforms={(() => {
+            const linked = activeCompany?.linked_accounts || {};
+            return (["linkedin", "facebook", "instagram"] as const).filter((p) => !!linked[p]) as any;
+          })()}
+          hasImage={!!imageMap[schedulerIdx]?.uri}
+        />
+      )}
 
       {toast && (
         <View testID="gen-toast" style={[styles.toast, { bottom: insets.bottom + 80 }]}>
@@ -383,9 +417,8 @@ function renderOutput(
   imageMap?: Record<number, { uri: string; loading?: boolean; error?: string }>,
   imagePromptMap?: Record<number, string>,
   setImagePromptMap?: (fn: any) => void,
-  scheduleMap?: Record<number, { datetime: string; show: boolean; saving: boolean }>,
-  setScheduleMap?: (fn: any) => void,
-  onSchedule?: (idx: number, content: string) => void,
+  scheduledIdx?: Set<number>,
+  onSchedule?: (idx: number) => void,
 ) {
   if (t === "cold-email") {
     return (out.variations || []).map((v: any, i: number) => (
@@ -563,32 +596,20 @@ function renderOutput(
             </View>
           )}
 
-          {/* Schedule row */}
+          {/* Schedule button — opens slick scheduling modal */}
           {onSchedule && (
-            <View style={{ marginTop: 10, gap: 8 }}>
-              <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-                <Ionicons name="time-outline" size={16} color={colors.textMuted} />
-                <TextInput
-                  testID={`schedule-input-${i}`}
-                  style={[styles.input, { flex: 1, fontSize: 13, paddingVertical: 8 }]}
-                  value={scheduleMap?.[i]?.datetime || ""}
-                  onChangeText={(v) => setScheduleMap?.((m: any) => ({ ...m, [i]: { ...(m[i] || {}), datetime: v, show: true } }))}
-                  placeholder="YYYY-MM-DDTHH:mm (e.g., 2026-06-25T15:30)"
-                  placeholderTextColor={colors.textSubtle}
-                  autoCapitalize="none"
-                />
-                <TouchableOpacity
-                  testID={`schedule-btn-${i}`}
-                  style={[styles.platformBtn, { backgroundColor: colors.text, flex: 0, paddingHorizontal: 12 }]}
-                  onPress={() => onSchedule(i, full)}
-                  disabled={scheduleMap?.[i]?.saving}
-                >
-                  {scheduleMap?.[i]?.saving ? <ActivityIndicator color="#fff" size="small" /> : (
-                    <Text style={styles.platformBtnText}>Schedule</Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </View>
+            <TouchableOpacity
+              testID={`schedule-btn-${i}`}
+              style={[styles.scheduleBtn, scheduledIdx?.has(i) && styles.scheduleBtnDone]}
+              onPress={() => onSchedule(i)}
+              activeOpacity={0.85}
+            >
+              <Ionicons name={scheduledIdx?.has(i) ? "checkmark-circle" : "calendar-outline"} size={16} color={scheduledIdx?.has(i) ? "#16a34a" : colors.text} />
+              <Text style={[styles.scheduleBtnText, scheduledIdx?.has(i) && { color: "#16a34a" }]}>
+                {scheduledIdx?.has(i) ? "Scheduled · tap to add another" : "Schedule for later"}
+              </Text>
+              {!scheduledIdx?.has(i) && <Ionicons name="chevron-forward" size={16} color={colors.textSubtle} />}
+            </TouchableOpacity>
           )}
 
           {/* Platform post buttons */}
@@ -698,4 +719,8 @@ const styles = StyleSheet.create({
   companyBannerWarn: { color: colors.error, fontSize: 11, fontWeight: "600", marginTop: 2 },
   companyBannerEmpty: { flexDirection: "row", alignItems: "center", gap: 8, padding: 12, marginBottom: spacing.md, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.error, borderStyle: "dashed", backgroundColor: "#FEF2F2" },
   companyBannerEmptyText: { color: colors.error, fontSize: 12, fontWeight: "600", flex: 1 },
+
+  scheduleBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10, paddingVertical: 12, paddingHorizontal: 14, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  scheduleBtnDone: { borderColor: "#16a34a", backgroundColor: "#ECFDF5" },
+  scheduleBtnText: { color: colors.text, fontWeight: "700", fontSize: 13, flex: 1 },
 });
