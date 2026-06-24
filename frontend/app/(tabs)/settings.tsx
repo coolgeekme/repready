@@ -335,41 +335,46 @@ export default function Settings() {
   };
 
   const autofillCompany = async () => {
-    if (!profile.company_name?.trim()) {
+    const name = (profile.company_name || "").trim();
+    if (!name) {
       setToast("Enter company name first");
       setTimeout(() => setToast(null), 1500);
       return;
     }
     setAutoFilling(true);
+    setToast(`Researching ${name}… (5-15s)`);
     try {
-      const res = await api.companyAutofill(profile.company_name.trim(), profile.company_website);
+      const res = await api.companyAutofill(name, profile.company_website);
       const patch = {
-        company_offerings: res.company_offerings || profile.company_offerings,
-        company_value_props: res.company_value_props || profile.company_value_props,
+        company_offerings: res.company_offerings || profile.company_offerings || "",
+        company_value_props: res.company_value_props || profile.company_value_props || "",
         industry: res.industry || profile.industry,
         target_audience: res.target_audience || profile.target_audience,
       };
-      setProfile({ ...profile, ...patch });
+      // Update local form immediately so the user sees the fields fill in
+      setProfile((p: any) => ({ ...p, ...patch }));
       // Persist to the active company (or profile fallback) — uses single source of truth
       if (activeCompanyId) {
         const current = companies.find((c) => c.id === activeCompanyId);
         await api.updateCompany(activeCompanyId, {
-          name: current?.name || profile.company_name,
-          website: profile.company_website,
-          offerings: patch.company_offerings,
-          value_props: patch.company_value_props,
-          industry: patch.industry,
-          target_audience: patch.target_audience,
+          name: current?.name || name,
+          website: profile.company_website || undefined,
+          offerings: patch.company_offerings || undefined,
+          value_props: patch.company_value_props || undefined,
+          industry: patch.industry || undefined,
+          target_audience: patch.target_audience || undefined,
         });
         await loadCompanies();
       } else {
         await api.updateProfile(patch);
       }
-      setToast(res.fetched_site ? "Auto-filled from site" : "Auto-filled (no site reached)");
-      setTimeout(() => setToast(null), 1800);
+      setToast(res.fetched_site ? "✓ Auto-filled from site" : "✓ Auto-filled (no site reached)");
+      setTimeout(() => setToast(null), 2500);
     } catch (e: any) {
-      setToast("Auto-fill failed");
-      setTimeout(() => setToast(null), 1500);
+      const msg = (e?.message || "").slice(0, 140);
+      console.warn("Auto-fill failed:", e);
+      setToast(`Auto-fill failed: ${msg || "try again"}`);
+      setTimeout(() => setToast(null), 4500);
     } finally {
       setAutoFilling(false);
     }
