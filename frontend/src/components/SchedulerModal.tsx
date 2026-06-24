@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Modal, ActivityIndicator } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { api } from "@/src/lib/api";
 import { colors, radii, spacing } from "@/src/theme";
 
 type Platform = "linkedin" | "facebook" | "instagram";
@@ -10,7 +11,6 @@ type Props = {
   onClose: () => void;
   onConfirm: (isoDatetime: string, platforms: Platform[]) => Promise<void> | void;
   defaultPlatforms?: Platform[]; // Pre-selected, usually company's linked platforms
-  linkedPlatforms?: Platform[]; // Which have linked accounts (enabled chips). Others are dimmed.
   contentPreview?: string; // First few chars of post being scheduled
   hasImage?: boolean; // Image attached → Instagram available
 };
@@ -69,7 +69,6 @@ export default function SchedulerModal({
   onClose,
   onConfirm,
   defaultPlatforms,
-  linkedPlatforms,
   contentPreview,
   hasImage,
 }: Props) {
@@ -78,19 +77,49 @@ export default function SchedulerModal({
   const [activePreset, setActivePreset] = useState<string | null>("tomorrow9");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Connected accounts at the USER level (any platform with ≥1 active Composio account is considered "linked")
+  const [accountsByPlatform, setAccountsByPlatform] = useState<Record<Platform, number>>({ linkedin: 0, facebook: 0, instagram: 0 });
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
 
-  // Reset state when modal opens
+  // Fetch account counts when modal opens
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    setAccountsLoaded(false);
+    (async () => {
+      const counts: Record<Platform, number> = { linkedin: 0, facebook: 0, instagram: 0 };
+      await Promise.all((["linkedin", "facebook", "instagram"] as Platform[]).map(async (p) => {
+        try {
+          const r = await api.socialAccounts(p);
+          const active = (r.accounts || []).filter((a: any) => a.status === "ACTIVE" || !a.status);
+          counts[p] = active.length;
+        } catch (e) {
+          counts[p] = 0;
+        }
+      }));
+      if (!cancelled) {
+        setAccountsByPlatform(counts);
+        setAccountsLoaded(true);
+        // Re-derive default selection now that we know what's available
+        const available = (Object.keys(counts) as Platform[]).filter((p) => counts[p] > 0);
+        const fromCompany = (defaultPlatforms || []).filter((p) => counts[p] > 0);
+        // If company has explicit links, use those; otherwise pre-select all available
+        const initial = (fromCompany.length > 0 ? fromCompany : available).filter((p) => p !== "instagram" || hasImage);
+        setPlatforms(initial.length > 0 ? initial : (available[0] ? [available[0]] : []));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visible, defaultPlatforms, hasImage]);
+
+  // Reset date/time when modal opens
   useEffect(() => {
     if (visible) {
       setWhen(tomorrowAt(9));
       setActivePreset("tomorrow9");
       setErr(null);
       setBusy(false);
-      // Pre-select linked platforms (excluding instagram if no image)
-      const initial = (defaultPlatforms || linkedPlatforms || []).filter((p) => p !== "instagram" || hasImage);
-      setPlatforms(initial.length > 0 ? initial : ["linkedin"]);
     }
-  }, [visible, defaultPlatforms, linkedPlatforms, hasImage]);
+  }, [visible]);
 
   const presets = useMemo(() => [
     { key: "in30", label: "In 30 min", build: () => inMinutes(30) },
@@ -127,7 +156,7 @@ export default function SchedulerModal({
     setPlatforms((cur) => cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]);
   };
 
-  const isLinked = (p: Platform) => (linkedPlatforms || []).includes(p);
+  const isLinked = (p: Platform) => accountsByPlatform[p] > 0;
   const igAllowed = hasImage === true;
 
   const submit = async () => {
@@ -244,37 +273,48 @@ export default function SchedulerModal({
 
             {/* Platforms */}
             <Text style={styles.sectionLabel}>Post to</Text>
-            <View style={styles.platformsRow}>
-              {PLATFORMS.map((p) => {
-                const selected = platforms.includes(p.key);
-                const linked = isLinked(p.key);
-                const disabled = !linked || (p.key === "instagram" && !igAllowed);
-                return (
-                  <TouchableOpacity
-                    key={p.key}
-                    testID={`sched-platform-${p.key}`}
-                    style={[
-                      styles.platformChip,
-                      { borderColor: p.color },
-                      selected && !disabled && { backgroundColor: p.color },
-                      disabled && styles.platformChipDisabled,
-                    ]}
-                    onPress={() => !disabled && togglePlatform(p.key)}
-                    disabled={disabled}
-                    activeOpacity={0.8}
-                  >
-                    <Ionicons name={p.icon} size={16} color={selected && !disabled ? "#fff" : p.color} />
-                    <Text style={[
-                      styles.platformChipText,
-                      { color: selected && !disabled ? "#fff" : p.color },
-                      disabled && { color: colors.textSubtle },
-                    ]}>{p.label}</Text>
-                    {!linked && <Text style={styles.platformWarn}>Not linked</Text>}
-                    {linked && p.key === "instagram" && !igAllowed && <Text style={styles.platformWarn}>Needs image</Text>}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            {!accountsLoaded ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 12 }}>
+                <ActivityIndicator color={colors.primary} size="small" />
+                <Text style={styles.platformChipText}>Checking connected accounts…</Text>
+              </View>
+            ) : (
+              <View style={styles.platformsRow}>
+                {PLATFORMS.map((p) => {
+                  const selected = platforms.includes(p.key);
+                  const linked = isLinked(p.key);
+                  const count = accountsByPlatform[p.key];
+                  const disabled = !linked || (p.key === "instagram" && !igAllowed);
+                  return (
+                    <TouchableOpacity
+                      key={p.key}
+                      testID={`sched-platform-${p.key}`}
+                      style={[
+                        styles.platformChip,
+                        { borderColor: p.color },
+                        selected && !disabled && { backgroundColor: p.color },
+                        disabled && styles.platformChipDisabled,
+                      ]}
+                      onPress={() => !disabled && togglePlatform(p.key)}
+                      disabled={disabled}
+                      activeOpacity={0.8}
+                    >
+                      <Ionicons name={p.icon} size={16} color={selected && !disabled ? "#fff" : p.color} />
+                      <Text style={[
+                        styles.platformChipText,
+                        { color: selected && !disabled ? "#fff" : p.color },
+                        disabled && { color: colors.textSubtle },
+                      ]}>{p.label}</Text>
+                      {linked && count > 1 && (
+                        <Text style={[styles.platformBadge, { color: selected && !disabled ? "#fff" : p.color }]}>×{count}</Text>
+                      )}
+                      {!linked && <Text style={styles.platformWarn}>Connect first</Text>}
+                      {linked && p.key === "instagram" && !igAllowed && <Text style={styles.platformWarn}>Needs image</Text>}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
 
             {err && (
               <View style={styles.errorBox}>
@@ -334,6 +374,7 @@ const styles = StyleSheet.create({
   platformChip: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderRadius: radii.sm, backgroundColor: "#fff", flexShrink: 0 },
   platformChipDisabled: { opacity: 0.45 },
   platformChipText: { fontWeight: "700", fontSize: 13 },
+  platformBadge: { fontSize: 11, fontWeight: "800", marginLeft: 2 },
   platformWarn: { color: colors.error, fontSize: 10, fontWeight: "700", marginLeft: 4 },
 
   errorBox: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, padding: 10, borderRadius: radii.sm, backgroundColor: "#FEF2F2", borderWidth: 1, borderColor: colors.error },

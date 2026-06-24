@@ -347,10 +347,6 @@ export default function GenerateScreen() {
             const v = output?.variations?.[schedulerIdx];
             return v?.hook || "";
           })()}
-          linkedPlatforms={(() => {
-            const linked = activeCompany?.linked_accounts || {};
-            return (["linkedin", "facebook", "instagram"] as const).filter((p) => !!linked[p]);
-          })()}
           defaultPlatforms={(() => {
             const linked = activeCompany?.linked_accounts || {};
             return (["linkedin", "facebook", "instagram"] as const).filter((p) => !!linked[p]) as any;
