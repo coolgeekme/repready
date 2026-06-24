@@ -4,7 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
-import * as WebBrowser from "expo-web-browser";
+import { router } from "expo-router";
 import { useAuth } from "@/src/contexts/AuthContext";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radii, spacing } from "@/src/theme";
@@ -112,20 +112,14 @@ export default function Settings() {
 
   const load = useCallback(async () => {
     try {
-      const [p, ...statuses] = await Promise.all([
-        api.getProfile(),
-        ...SOCIALS.map((s) => api.socialStatus(s.key)),
-      ]);
+      const p = await api.getProfile();
       setProfile(p || {});
-      const map: Record<string, SocialState> = {};
-      SOCIALS.forEach((s, i) => { map[s.key] = statuses[i] || { connected: false }; });
-      setSocials(map);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); loadCompanies(); refreshAllAccounts(); }, [load, loadCompanies, refreshAllAccounts]);
+  useEffect(() => { load(); loadCompanies(); }, [load, loadCompanies]);
 
   const save = async (patch: any) => {
     const next = { ...profile, ...patch };
@@ -266,6 +260,30 @@ export default function Settings() {
     } catch (e) {
       setToast("Switch failed");
       setTimeout(() => setToast(null), 1500);
+    }
+  };
+
+  const onCreateAndOpen = async () => {
+    const name = (newCompanyName || "").trim();
+    if (!name) {
+      setToast("Type a company name first");
+      setTimeout(() => setToast(null), 1500);
+      return;
+    }
+    setSavingNewCompany(true);
+    try {
+      const c = await api.createCompany({ name });
+      await api.activateCompany(c.id);
+      setNewCompanyName("");
+      setNewCompanyMode(false);
+      // Refresh in background; navigate immediately
+      loadCompanies();
+      router.push(`/company/${c.id}`);
+    } catch (e: any) {
+      setToast(`Add failed: ${(e?.message || "").slice(0, 80)}`);
+      setTimeout(() => setToast(null), 2200);
+    } finally {
+      setSavingNewCompany(false);
     }
   };
 
@@ -437,39 +455,52 @@ export default function Settings() {
           placeholderTextColor={colors.textSubtle}
         />
 
-        {/* Company info section */}
+        {/* Company info section — list-only; tap a card to manage it */}
         <View style={styles.sectionHeader}>
           <Ionicons name="business-outline" size={16} color={colors.primary} />
           <Text style={styles.sectionHeaderText}>Companies</Text>
         </View>
-        <Text style={styles.helper}>Switch between businesses. The active one drives every generation.</Text>
+        <Text style={styles.helper}>
+          Manage your businesses. The one marked “Active” drives every generation. Tap a card to edit details and link social accounts.
+        </Text>
 
-        {/* Companies list — always shown, including empty state */}
-        {companies.length > 0 ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
-            {companies.map((c) => {
-              const isActive = activeCompanyId === c.id;
-              return (
-                <TouchableOpacity
-                  key={c.id}
-                  testID={`company-chip-${c.id}`}
-                  onPress={() => activateCompany(c.id)}
-                  onLongPress={() => setConfirmDeleteId(c.id)}
-                  style={[styles.chip, isActive && styles.chipActive]}
-                >
-                  <Text style={[styles.chipText, isActive && styles.chipTextActive]} numberOfLines={1}>{c.name}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        ) : (
+        {companies.length === 0 ? (
           <View style={styles.emptyCompaniesCard}>
-            <Ionicons name="business-outline" size={20} color={colors.textSubtle} />
-            <Text style={styles.emptyCompaniesText}>No companies yet — add your first one below.</Text>
+            <Ionicons name="business-outline" size={22} color={colors.textSubtle} />
+            <Text style={styles.emptyCompaniesText}>No companies yet — add your first one to get started.</Text>
           </View>
+        ) : (
+          companies.map((c) => {
+            const isActive = activeCompanyId === c.id;
+            const linked = (c.linked_accounts || {}) as Record<string, string>;
+            const linkedPlatforms = ["linkedin", "facebook", "instagram"].filter((p) => !!linked[p]);
+            return (
+              <TouchableOpacity
+                key={c.id}
+                testID={`company-card-${c.id}`}
+                style={[styles.companyCard, isActive && styles.companyCardActive]}
+                onPress={() => router.push(`/company/${c.id}`)}
+                activeOpacity={0.85}
+              >
+                <View style={styles.companyCardIcon}>
+                  <Ionicons name="business" size={20} color={isActive ? colors.primary : colors.textMuted} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.companyCardTitleRow}>
+                    <Text style={styles.companyCardName} numberOfLines={1}>{c.name}</Text>
+                    {isActive && <Text style={styles.activeBadge}>ACTIVE</Text>}
+                  </View>
+                  <Text style={styles.companyCardMeta} numberOfLines={1}>
+                    {c.website ? c.website : "No website"}
+                    {linkedPlatforms.length > 0 ? ` · ${linkedPlatforms.length} social linked` : ""}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={colors.textSubtle} />
+              </TouchableOpacity>
+            );
+          })
         )}
 
-        {/* Inline new-company form */}
         {newCompanyMode ? (
           <View style={styles.newCompanyCard}>
             <Text style={styles.newCompanyLabel}>New company</Text>
@@ -481,7 +512,7 @@ export default function Settings() {
               placeholder="e.g. Acme Inc."
               placeholderTextColor={colors.textSubtle}
               autoFocus
-              onSubmitEditing={() => addCompany()}
+              onSubmitEditing={() => onCreateAndOpen()}
             />
             <View style={styles.newCompanyBtnRow}>
               <TouchableOpacity
@@ -495,11 +526,11 @@ export default function Settings() {
               <TouchableOpacity
                 testID="new-company-save"
                 style={[styles.newCompanyBtn, styles.newCompanyBtnPrimary, (!newCompanyName.trim() || savingNewCompany) && { opacity: 0.5 }]}
-                onPress={() => addCompany()}
+                onPress={() => onCreateAndOpen()}
                 disabled={!newCompanyName.trim() || savingNewCompany}
               >
                 {savingNewCompany ? <ActivityIndicator color="#fff" size="small" /> : (
-                  <Text style={styles.newCompanyBtnPrimaryText}>Create</Text>
+                  <Text style={styles.newCompanyBtnPrimaryText}>Create & open</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -515,128 +546,6 @@ export default function Settings() {
             <Text style={styles.addCompanyBtnText}>{companies.length === 0 ? "Add your first company" : "Add another company"}</Text>
           </TouchableOpacity>
         )}
-
-        {activeCompanyId && activeCompany && (
-          <View style={styles.editingBanner}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.editingLabel}>Editing</Text>
-              <Text style={styles.editingName} numberOfLines={1}>{activeCompany.name}</Text>
-            </View>
-            <TouchableOpacity
-              testID={`delete-company-${activeCompanyId}`}
-              style={styles.deleteCompanyBtn}
-              onPress={() => setConfirmDeleteId(activeCompanyId)}
-              hitSlop={6}
-            >
-              <Ionicons name="trash-outline" size={18} color={colors.error} />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Confirm delete dialog (inline) */}
-        {confirmDeleteId && (
-          <View style={styles.confirmCard}>
-            <Text style={styles.confirmTitle}>Delete this company?</Text>
-            <Text style={styles.confirmDesc}>
-              “{companies.find((c) => c.id === confirmDeleteId)?.name || "this company"}” will be removed. Past generations stay in your library.
-            </Text>
-            <View style={styles.newCompanyBtnRow}>
-              <TouchableOpacity
-                testID="confirm-delete-cancel"
-                style={[styles.newCompanyBtn, styles.newCompanyBtnGhost]}
-                onPress={() => setConfirmDeleteId(null)}
-                disabled={!!deletingCompanyId}
-              >
-                <Text style={styles.newCompanyBtnGhostText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                testID="confirm-delete-confirm"
-                style={[styles.newCompanyBtn, styles.deleteConfirmBtn]}
-                onPress={() => removeCompany(confirmDeleteId)}
-                disabled={!!deletingCompanyId}
-              >
-                {deletingCompanyId ? <ActivityIndicator color="#fff" size="small" /> : (
-                  <Text style={styles.newCompanyBtnPrimaryText}>Delete</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        <Text style={styles.sectionLabel}>Company name</Text>
-        <TextInput
-          testID="settings-company-name"
-          style={[styles.input, !activeCompanyId && { opacity: 0.5 }]}
-          value={profile.company_name || ""}
-          onChangeText={(t) => setProfile({ ...profile, company_name: t })}
-          onBlur={() => saveCompanyField({ company_name: profile.company_name || "" })}
-          placeholder={activeCompanyId ? "Acme Inc." : "Create a company above first"}
-          placeholderTextColor={colors.textSubtle}
-          editable={!!activeCompanyId}
-        />
-
-        <Text style={styles.sectionLabel}>Website (optional, recommended)</Text>
-        <TextInput
-          testID="settings-company-website"
-          style={[styles.input, !activeCompanyId && { opacity: 0.5 }]}
-          value={profile.company_website || ""}
-          onChangeText={(t) => setProfile({ ...profile, company_website: t })}
-          onBlur={() => saveCompanyField({ company_website: profile.company_website || "" })}
-          placeholder="acme.com"
-          placeholderTextColor={colors.textSubtle}
-          autoCapitalize="none"
-          keyboardType="url"
-          editable={!!activeCompanyId}
-        />
-
-        {/* AI Autofill */}
-        <TouchableOpacity
-          testID="settings-company-autofill"
-          style={[styles.autofillBtn, (!profile.company_name?.trim() || autoFilling) && styles.autofillBtnDisabled]}
-          onPress={autofillCompany}
-          disabled={!profile.company_name?.trim() || autoFilling}
-          activeOpacity={0.85}
-        >
-          {autoFilling ? (
-            <>
-              <ActivityIndicator color="#fff" />
-              <Text style={styles.autofillText}>Researching {profile.company_name || "company"}…</Text>
-            </>
-          ) : (
-            <>
-              <Ionicons name="sparkles" size={16} color="#fff" />
-              <Text style={styles.autofillText}>Auto-fill with AI</Text>
-              <View style={styles.aiBadge}><Text style={styles.aiBadgeText}>AI</Text></View>
-            </>
-          )}
-        </TouchableOpacity>
-        <Text style={styles.autofillHelper}>
-          Reads your website and fills offerings, value props, industry, and ICP. Edit anything below before relying on it.
-        </Text>
-
-        <Text style={styles.sectionLabel}>What does your company sell?</Text>
-        <TextInput
-          testID="settings-company-offerings"
-          style={[styles.input, styles.textarea]}
-          value={profile.company_offerings || ""}
-          onChangeText={(t) => setProfile({ ...profile, company_offerings: t })}
-          onBlur={() => saveCompanyField({ company_offerings: profile.company_offerings || "" })}
-          multiline
-          placeholder={"Describe your product/service in 2-4 sentences. Who it's for, what it does, how it's delivered."}
-          placeholderTextColor={colors.textSubtle}
-        />
-
-        <Text style={styles.sectionLabel}>Key value props / differentiators (optional)</Text>
-        <TextInput
-          testID="settings-company-value-props"
-          style={[styles.input, styles.textarea]}
-          value={profile.company_value_props || ""}
-          onChangeText={(t) => setProfile({ ...profile, company_value_props: t })}
-          onBlur={() => saveCompanyField({ company_value_props: profile.company_value_props || "" })}
-          multiline
-          placeholder={"• 40% faster onboarding\n• SOC 2 compliant\n• Only solution with native Salesforce sync"}
-          placeholderTextColor={colors.textSubtle}
-        />
 
         {/* Brand & guidelines section */}
         <View style={styles.sectionHeader}>
@@ -664,107 +573,6 @@ export default function Settings() {
           <Text style={styles.uploadText}>{profile.guidelines_file_name || "Choose file"}</Text>
           <Text style={styles.uploadHint}>PDF / TXT</Text>
         </TouchableOpacity>
-
-        {/* Social integrations via Composio */}
-        <View style={styles.sectionHeader}>
-          <Ionicons name="share-social-outline" size={16} color={colors.primary} />
-          <Text style={styles.sectionHeaderText}>Social accounts</Text>
-        </View>
-        <Text style={styles.helper}>
-          Connect one or more accounts per network. The radio button picks which account
-          {activeCompany?.name ? ` "${activeCompany.name}"` : " the active company"} uses when posting.
-        </Text>
-
-        {SOCIALS.map((s) => {
-          const state = socials[s.key] || { connected: false };
-          const notConfigured = state.configured === false;
-          const isConnecting = connecting === s.key;
-          const accounts = accountsByPlatform[s.key] || [];
-          const linkedId = linkedFor(s.key);
-          const activeAccounts = accounts.filter((a) => a.status === "ACTIVE" || !a.status);
-          return (
-            <View key={s.key} style={styles.platformBlock}>
-              <View style={styles.platformHeader}>
-                <Ionicons name={s.icon} size={22} color={s.color} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.platformTitle}>{s.label}</Text>
-                  <Text style={styles.platformSubtitle}>
-                    {notConfigured
-                      ? "Not configured in backend"
-                      : activeAccounts.length === 0
-                      ? "No accounts connected yet"
-                      : `${activeAccounts.length} account${activeAccounts.length === 1 ? "" : "s"} connected`}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  testID={`settings-${s.key}-connect`}
-                  style={[styles.smallBtn, { backgroundColor: s.color }, notConfigured && { opacity: 0.5 }]}
-                  onPress={() => connectSocial(s.key)}
-                  disabled={isConnecting || notConfigured}
-                >
-                  {isConnecting ? <ActivityIndicator color="#fff" size="small" /> : (
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-                      <Ionicons name="add" size={14} color="#fff" />
-                      <Text style={styles.smallBtnText}>{activeAccounts.length === 0 ? "Connect" : "Add"}</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              </View>
-
-              {activeAccounts.length > 0 && (
-                <View style={styles.accountsList}>
-                  {activeAccounts.map((a) => {
-                    const isLinked = linkedId === a.id;
-                    const linkKey = `link-${s.key}-${a.id}`;
-                    const delKey = `delete-${s.key}-${a.id}`;
-                    const linking = linkBusy === linkKey || linkBusy === `link-${s.key}-none`;
-                    const deleting = linkBusy === delKey;
-                    return (
-                      <View key={a.id} style={styles.accountRow}>
-                        <TouchableOpacity
-                          testID={`account-link-${s.key}-${a.id}`}
-                          style={styles.radioWrap}
-                          onPress={() => linkAccount(s.key, isLinked ? null : a.id)}
-                          disabled={linking || !activeCompanyId}
-                          activeOpacity={0.7}
-                        >
-                          <View style={[styles.radio, isLinked && styles.radioActive]}>
-                            {isLinked && <View style={styles.radioDot} />}
-                          </View>
-                        </TouchableOpacity>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.accountName} numberOfLines={1}>
-                            {a.display_name || `Account …${a.id.slice(-6)}`}
-                          </Text>
-                          <Text style={styles.accountMeta}>
-                            {isLinked
-                              ? `Used by ${activeCompany?.name || "active company"}`
-                              : a.status === "ACTIVE" ? "Active" : (a.status || "Connected")}
-                          </Text>
-                        </View>
-                        <TouchableOpacity
-                          testID={`account-delete-${s.key}-${a.id}`}
-                          style={styles.accountDelBtn}
-                          onPress={() => deleteAccount(s.key, a.id)}
-                          disabled={deleting}
-                          hitSlop={6}
-                        >
-                          {deleting ? <ActivityIndicator color={colors.error} size="small" /> : (
-                            <Ionicons name="trash-outline" size={16} color={colors.error} />
-                          )}
-                        </TouchableOpacity>
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
-
-              {accounts.length === 0 && !notConfigured && state.connected === false && (
-                <Text style={styles.accountHint}>Tap “Connect” to authorise your first {s.label} account.</Text>
-              )}
-            </View>
-          );
-        })}
 
         {/* Sign out */}
         <TouchableOpacity testID="settings-signout" style={styles.signOut} onPress={signOutUser}>
@@ -811,6 +619,13 @@ const styles = StyleSheet.create({
   emptyCompaniesCard: { flexDirection: "row", alignItems: "center", gap: 10, padding: spacing.md, borderWidth: 1, borderColor: colors.border, borderStyle: "dashed", borderRadius: radii.sm, backgroundColor: colors.surface, marginTop: 8 },
   emptyCompaniesText: { color: colors.textMuted, fontSize: 13, flex: 1 },
 
+  companyCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: spacing.md, marginTop: 8, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: "#fff" },
+  companyCardActive: { borderColor: colors.primary, backgroundColor: "#EEF2FF" },
+  companyCardIcon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
+  companyCardTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  companyCardName: { color: colors.text, fontWeight: "700", fontSize: 15, flexShrink: 1 },
+  companyCardMeta: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  activeBadge: { color: colors.primary, fontSize: 10, fontWeight: "800", letterSpacing: 1.4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: "#fff", borderWidth: 1, borderColor: colors.primary, overflow: "hidden" },
   addCompanyBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 14, marginTop: 10, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.primary, borderStyle: "dashed", backgroundColor: "#EEF2FF" },
   addCompanyBtnText: { color: colors.primary, fontWeight: "700", fontSize: 14 },
 

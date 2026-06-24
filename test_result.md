@@ -145,14 +145,26 @@ frontend:
   - task: "Companies CRUD UI — add/remove/switch/save multiple companies"
     implemented: true
     working: true
-    file: "/app/frontend/app/(tabs)/settings.tsx"
+    file: "/app/frontend/app/(tabs)/settings.tsx, /app/frontend/app/company/[id].tsx, /app/frontend/src/components/CompanySocialsSection.tsx"
     stuck_count: 0
     priority: "high"
     needs_retesting: true
     status_history:
       - working: true
         agent: "main"
-        comment: "User reported: cannot add multiple companies. Root cause was a UX bug — the + Add chip was hidden when companies.length===0, and editing the name field overwrote the active company instead of creating a new one. Fixed by adding: (1) always-visible 'Add company' button that opens an inline create form with explicit name input + Create/Cancel buttons, (2) an EDITING banner showing the active company name + a trash-icon delete that opens an inline red-tinted confirm dialog with Cancel/Delete actions, (3) chips row always shown (with empty-state card when no companies), (4) form fields are disabled with a placeholder hint when no company is active, (5) after creating a new company, the form is cleared and ready for the new company's details. All four CRUD operations validated by screenshots: create empty, add 3 companies, switch active by tapping chip, delete with confirm. TestIDs: add-company-btn, new-company-name-input, new-company-save, new-company-cancel, delete-company-{id}, confirm-delete-confirm, confirm-delete-cancel."
+        comment: "Major UX refactor based on user request. Moved per-company management to a dedicated screen at /company/[id]. Settings tab is now a clean list of company cards (each showing name, ACTIVE badge, website summary, chevron). Tapping a card navigates to the company detail page where users edit name, website, offerings, value props, industry, target audience, auto-fill with AI, link specific social accounts, and delete. + Add another company button is always visible; tapping it shows an inline name input, then Create & open immediately navigates to the new company's detail. The CompanySocialsSection component renders multi-account list + radio button to pick which Composio account this company posts from + trash icon to delete + Connect button to add more. Verified end-to-end via screenshots: empty state → create 2 companies (each opens detail page on creation) → back to settings shows both as cards → tap card opens detail → social linking section displays per-platform blocks with empty state."
+
+  - task: "Per-company social linking via dedicated screen"
+    implemented: true
+    working: true
+    file: "/app/frontend/app/company/[id].tsx, /app/frontend/src/components/CompanySocialsSection.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "CompanySocialsSection takes companyId + companyName + linkedAccounts as props, fetches social accounts on mount, shows per-platform blocks with: + Connect button (starts Composio OAuth and adds a new account at user level), radio selector to link/unlink each account to this specific company (calls POST /api/companies/{id}/link-account), trash icon to delete account (calls DELETE /api/social/{platform}/accounts/{id}). The radio button label dynamically shows 'Used by {companyName}'. Each company on its detail page can have its own independent linked account per platform."
 
   - task: "Generator screen routes to correct linked account"
     implemented: true
