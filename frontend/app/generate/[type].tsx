@@ -117,7 +117,7 @@ export default function GenerateScreen() {
         setErr("Instagram needs an image. Tap \"Generate image\" first.");
         return;
       }
-      // Parse base64 + mime from data URI for backend image upload
+      // Parse base64 + mime from data URI; backend will host it publicly for Instagram/Facebook
       let image_b64: string | undefined;
       let image_mime: string | undefined;
       if (dataUri && dataUri.startsWith("data:")) {
@@ -126,7 +126,8 @@ export default function GenerateScreen() {
         const m = /data:([^;]+);base64/.exec(head);
         image_mime = m?.[1] || "image/png";
       }
-      await api.socialPost(platform, content, { image_url: dataUri, image_b64, image_mime });
+      // Never pass a data: URI as image_url — Instagram needs a real HTTPS URL
+      await api.socialPost(platform, content, { image_b64, image_mime });
       const withImage = !!image_b64;
       setToast(`Posted to ${platform.charAt(0).toUpperCase() + platform.slice(1)}${withImage ? " with image" : ""} ✓`);
       setTimeout(() => setToast(null), 2000);

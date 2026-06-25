@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request
+from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -7,6 +8,8 @@ import logging
 import json
 import uuid
 import re
+import secrets
+import base64
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -951,10 +954,91 @@ def _build_post_args(platform: str, content: str, image_url: Optional[str], auth
     if platform == "linkedin":
         return {"author": author_urn or "", "commentary": content}
     if platform == "facebook":
-        return {"text": content}
+        args: Dict[str, Any] = {"text": content}
+        if image_url:
+            # FACEBOOK_CREATE_POST accepts an optional photo URL field
+            args["url"] = image_url
+        return args
     if platform == "instagram":
         return {"caption": content, "image_url": image_url or ""}
     return {}
+
+
+# ---------- Public image hosting (so Instagram/Facebook can fetch HTTPS images) ----------
+def _resolve_public_base(request: Optional[Request]) -> str:
+    """Return the canonical public HTTPS base URL for this backend.
+    Priority: PUBLIC_BACKEND_URL env var > x-forwarded headers > request.url base.
+    """
+    base = (os.environ.get("PUBLIC_BACKEND_URL") or "").strip().rstrip("/")
+    if base:
+        return base
+    if request is not None:
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
+        host = request.headers.get("x-forwarded-host") or request.url.netloc
+        if host:
+            return f"{proto}://{host}".rstrip("/")
+    # Last resort fallback - won't work for Instagram, but doesn't crash
+    return ""
+
+
+async def _host_public_image(image_b64: str, image_mime: str, request: Optional[Request]) -> str:
+    """Store a base64 image as a temporary public asset and return its HTTPS URL.
+    The asset is valid for 2 hours and is served by GET /api/public/social-image/{id}.
+    Returns an empty string if no public base URL is resolvable.
+    """
+    try:
+        # Strip data-URI prefix if accidentally present
+        if image_b64 and image_b64.startswith("data:") and "," in image_b64:
+            head, image_b64 = image_b64.split(",", 1)
+            if "image/" in head:
+                image_mime = head.split(":")[1].split(";")[0]
+        img_bytes = base64.b64decode(image_b64)
+    except Exception as e:
+        logger.warning(f"_host_public_image: failed to decode b64: {e}")
+        return ""
+    base = _resolve_public_base(request)
+    if not base:
+        return ""
+    img_id = secrets.token_urlsafe(16)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=2)
+    try:
+        await db.public_images.insert_one({
+            "id": img_id,
+            "data": img_bytes,
+            "mime": (image_mime or "image/png"),
+            "created_at": now.isoformat(),
+            "expires_at": expires_at,
+        })
+    except Exception as e:
+        logger.error(f"_host_public_image: insert failed: {e}")
+        return ""
+    return f"{base}/api/public/social-image/{img_id}"
+
+
+# Public (no auth) image serving route. Mounted on api_router so it goes through /api.
+@api_router.get("/public/social-image/{img_id}")
+async def get_public_social_image(img_id: str):
+    doc = await db.public_images.find_one({"id": img_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    exp = doc.get("expires_at")
+    if isinstance(exp, datetime) and exp < datetime.now(timezone.utc):
+        # Cleanup the expired doc
+        try:
+            await db.public_images.delete_one({"id": img_id})
+        except Exception:
+            pass
+        raise HTTPException(status_code=410, detail="Expired")
+    raw = doc.get("data") or b""
+    if isinstance(raw, str):
+        # Defensive: if stored as base64 string for any reason
+        try:
+            raw = base64.b64decode(raw)
+        except Exception:
+            pass
+    mime = doc.get("mime") or "image/png"
+    return Response(content=raw, media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
 
 
 @api_router.post("/generate/topic-ideas")
@@ -1169,7 +1253,7 @@ async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
 
 
 @api_router.post("/social/{platform}/post")
-async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
+async def social_post(platform: str, payload: Dict[str, Any], request: Request, user_id: str = Depends(get_user_id)):
     if platform not in SOCIAL_POST_TOOLS:
         raise HTTPException(status_code=404, detail="Unknown platform")
     _require_social_config(platform)
@@ -1181,11 +1265,21 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
     if not content:
         raise HTTPException(status_code=400, detail="content is required")
 
-    # Strip data-URI prefix if present
+    # If the caller accidentally passed a data: URI as image_url, treat it as base64
+    if image_url and image_url.startswith("data:"):
+        if not image_b64:
+            try:
+                head, image_b64 = image_url.split(",", 1)
+                if "image/" in head:
+                    image_mime = head.split(":")[1].split(";")[0]
+            except Exception:
+                pass
+        image_url = None  # Never pass data URIs downstream — Instagram/Facebook need real HTTPS
+
+    # Strip data-URI prefix on image_b64 if present
     if image_b64 and image_b64.startswith("data:"):
         try:
             head, image_b64 = image_b64.split(",", 1)
-            # Try to detect mimetype from the data URI header
             if "image/" in head:
                 image_mime = head.split(":")[1].split(";")[0]
         except Exception:
@@ -1217,6 +1311,17 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
                 # Continue with text-only rather than fail the whole post
                 args.pop("images", None)
     else:
+        # Instagram (and Facebook with photo) require a publicly fetchable HTTPS URL.
+        # If we only have base64 bytes, host them on our backend and use that URL.
+        if platform in ("instagram", "facebook") and image_b64 and not image_url:
+            hosted = await _host_public_image(image_b64, image_mime, request)
+            if hosted:
+                image_url = hosted
+            elif platform == "instagram":
+                raise HTTPException(
+                    status_code=502,
+                    detail="Couldn't host the image publicly. Please retry — Instagram needs a public image URL.",
+                )
         args = _build_post_args(platform, content, image_url, None)
 
     slug = tool["slug"]
@@ -1232,16 +1337,30 @@ async def social_post(platform: str, payload: Dict[str, Any], user_id: str = Dep
 
     def _humanize_provider_error(raw: Any, platform: str) -> str:
         s = str(raw or "")
-        if "<html" in s.lower() or "<!doctype" in s.lower():
-            return f"{platform.capitalize()} rejected the request. Reconnect your account or check scopes."
-        if platform == "facebook" and ("page_id" in s or "Page" in s):
+        s_low = s.lower()
+        if "<html" in s_low or "<!doctype" in s_low or "cloudflare" in s_low:
+            return (f"{platform.capitalize()} is temporarily unreachable (gateway returned an HTML error). "
+                    "Please try again in a minute.")
+        if "invalid request data" in s_low or "invalid_request" in s_low:
+            if platform == "instagram":
+                return ("Instagram rejected the post. Make sure you're connected to an Instagram Business or "
+                        "Creator account and that the image is a JPG/PNG under 8MB.")
+            if platform == "facebook":
+                return ("Facebook rejected the post. The connected account must be a Facebook Page "
+                        "(not a personal profile).")
+            return f"{platform.capitalize()} rejected the request. Please check your content and try again."
+        if "connectedaccountnotfound" in s_low or "no connected account" in s_low:
+            return f"No {platform} account connected. Please connect {platform} in Settings."
+        if platform == "facebook" and ("page_id" in s_low or "page" in s_low and "permission" in s_low):
             return ("Facebook requires posting to a Page (not a personal profile). "
-                    "We need to add a Page picker — coming soon.")
-        if platform == "instagram" and ("ig_user_id" in s or "creation_id" in s):
-            return ("Instagram requires a Business Account + a publicly-hosted image. "
-                    "We need to add image hosting + Business Account picker — coming soon.")
-        s = re.sub(r"\s+", " ", s).strip()
-        return s[:400]
+                    "Please reconnect Facebook and grant page permissions.")
+        if platform == "instagram" and ("ig_user_id" in s_low or "creation_id" in s_low or "business" in s_low):
+            return ("Instagram requires a Business or Creator account linked to a Facebook Page. "
+                    "Reconnect Instagram via Settings.")
+        # Trim runaway whitespace and HTML noise
+        clean = re.sub(r"\s+", " ", s).strip()
+        clean = re.sub(r"<[^>]+>", "", clean)
+        return clean[:280] if clean else f"{platform.capitalize()} posting failed."
 
     try:
         result = await asyncio.to_thread(_execute)
@@ -1325,41 +1444,80 @@ async def _execute_social_post(user_id: str, platform: str, content: str, image_
         return {"platform": platform, "success": False, "error": "Unknown platform"}
     if not SOCIAL_AUTH_CONFIGS.get(platform):
         return {"platform": platform, "success": False, "error": f"{platform} not configured"}
+
+    # Strip data-URI prefix on image_b64 if present
+    if image_b64 and isinstance(image_b64, str) and image_b64.startswith("data:") and "," in image_b64:
+        try:
+            head, image_b64 = image_b64.split(",", 1)
+            if "image/" in head:
+                image_mime = head.split(":")[1].split(";")[0]
+        except Exception:
+            pass
+
+    chosen_conn_id: Optional[str] = None
+    active_company = await _get_active_company(user_id)
+    if active_company:
+        linked = active_company.get("linked_accounts") or {}
+        chosen_conn_id = linked.get(platform)
+
+    slug = SOCIAL_POST_TOOLS[platform]["slug"]
+    args: Dict[str, Any] = {}
+
     if platform == "linkedin":
-        # Use the company's chosen LinkedIn account if set
-        chosen_conn_id: Optional[str] = None
-        active_company = await _get_active_company(user_id)
-        if active_company:
-            linked = active_company.get("linked_accounts") or {}
-            chosen_conn_id = linked.get("linkedin")
         try:
             author_urn = await _linkedin_get_author_urn(user_id)
         except Exception as e:
             return {"platform": platform, "success": False, "error": f"URN: {e}"}
-        args: Dict[str, Any] = {"author": author_urn, "commentary": content}
+        args = {"author": author_urn, "commentary": content}
         if image_b64:
             try:
                 args["images"] = [await _linkedin_upload_image(user_id, author_urn, image_b64, image_mime or "image/png")]
             except Exception as e:
                 logger.warning(f"Schedule image upload failed for linkedin: {e}")
-        slug = SOCIAL_POST_TOOLS[platform]["slug"]
-        def _exec():
-            client = _composio_client()
-            kwargs: Dict[str, Any] = {"user_id": user_id, "slug": slug, "arguments": args, "dangerously_skip_version_check": True}
-            if chosen_conn_id:
-                kwargs["connected_account_id"] = chosen_conn_id
-            return client.tools.execute(**kwargs)
+    elif platform in ("instagram", "facebook"):
+        # Host the image publicly so Instagram/Facebook can fetch it
+        image_url: Optional[str] = None
+        if image_b64:
+            image_url = await _host_public_image(image_b64, image_mime or "image/png", None)
+        if platform == "instagram" and not image_url:
+            return {"platform": platform, "success": False, "error": "Instagram requires an image — none was provided or hosting failed."}
+        args = _build_post_args(platform, content, image_url, None)
+    else:
+        return {"platform": platform, "success": False, "error": f"{platform} posting not yet supported"}
+
+    def _exec():
+        client = _composio_client()
+        kwargs: Dict[str, Any] = {
+            "user_id": user_id, "slug": slug, "arguments": args,
+            "dangerously_skip_version_check": True,
+        }
+        if chosen_conn_id:
+            kwargs["connected_account_id"] = chosen_conn_id
+        return client.tools.execute(**kwargs)
+
+    try:
+        result = await asyncio.to_thread(_exec)
+        success = True
+        err_payload: Any = None
         try:
-            await asyncio.to_thread(_exec)
-            if history_id:
-                await db.history.update_one(
-                    {"id": history_id, "user_id": user_id},
-                    {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
-                )
-            return {"platform": platform, "success": True}
-        except Exception as e:
-            return {"platform": platform, "success": False, "error": str(e)[:300]}
-    return {"platform": platform, "success": False, "error": f"{platform} posting not yet supported"}
+            if hasattr(result, "successful"):
+                success = bool(result.successful)
+                err_payload = getattr(result, "error", None) or getattr(result, "data", None)
+            elif isinstance(result, dict):
+                success = bool(result.get("successful", True))
+                err_payload = result.get("error") or result.get("data")
+        except Exception:
+            pass
+        if not success:
+            return {"platform": platform, "success": False, "error": str(err_payload or result)[:300]}
+        if history_id:
+            await db.history.update_one(
+                {"id": history_id, "user_id": user_id},
+                {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
+            )
+        return {"platform": platform, "success": True}
+    except Exception as e:
+        return {"platform": platform, "success": False, "error": str(e)[:300]}
 
 
 async def _scheduler_loop():
