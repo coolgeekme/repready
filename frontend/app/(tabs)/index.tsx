@@ -70,7 +70,7 @@ export default function Home() {
         {/* Header */}
         <View style={styles.header}>
           <View>
-            <Text style={styles.overline}>RepReady</Text>
+            <Text style={styles.overline}>SalesReady</Text>
             <Text style={styles.h1}>Hi {firstName || "there"} 👋</Text>
             <Text style={styles.sub}>
               {profile?.role || "Set your role"} · {profile?.industry || "Set your industry"}

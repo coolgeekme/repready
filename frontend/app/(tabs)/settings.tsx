@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
+import Constants from "expo-constants";
 import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/contexts/AuthContext";
 import { api } from "@/src/lib/api";
@@ -320,6 +321,15 @@ export default function Settings() {
           </TouchableOpacity>
         )}
 
+        {/* Version footer */}
+        <View testID="settings-version" style={styles.versionFooter}>
+          <Text style={styles.versionAppName}>SalesReady</Text>
+          <Text style={styles.versionLine}>
+            v{Constants.expoConfig?.version || "1.0.0"} ({Constants.nativeBuildVersion || "—"}) · OTA {((Constants.expoConfig as any)?.updates?.runtimeVersion || Constants.expoConfig?.runtimeVersion || "dev")}
+          </Text>
+          <Text style={styles.versionMeta}>{Constants.expoConfig?.sdkVersion ? `Expo SDK ${Constants.expoConfig.sdkVersion}` : ""}{Constants.executionEnvironment ? ` · ${Constants.executionEnvironment}` : ""}</Text>
+        </View>
+
         {toast && (
           <View testID="settings-toast" style={styles.toast}>
             <Text style={styles.toastText}>{toast}</Text>
@@ -423,6 +433,11 @@ const styles = StyleSheet.create({
   adminLink: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10, padding: 14, borderRadius: radii.sm, borderWidth: 1, borderColor: "#7c3aed", backgroundColor: "#F3E8FF" },
   adminLinkTitle: { color: "#7c3aed", fontWeight: "800", fontSize: 14 },
   adminLinkDesc: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
+
+  versionFooter: { alignItems: "center", marginTop: spacing.xl, paddingVertical: spacing.md, paddingHorizontal: spacing.md, gap: 2 },
+  versionAppName: { color: colors.textSubtle, fontSize: 11, fontWeight: "800", letterSpacing: 2 },
+  versionLine: { color: colors.textMuted, fontSize: 11, fontWeight: "600", marginTop: 2 },
+  versionMeta: { color: colors.textSubtle, fontSize: 10, marginTop: 2 },
 
   toast: { position: "absolute", bottom: 30, left: 0, right: 0, alignItems: "center" },
   toastText: { backgroundColor: colors.black, color: "#fff", paddingHorizontal: 16, paddingVertical: 10, borderRadius: radii.sm, overflow: "hidden", fontWeight: "600" },

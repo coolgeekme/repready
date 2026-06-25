@@ -32,7 +32,7 @@ export default function SignIn() {
       <KeyboardAwareScrollView contentContainerStyle={styles.scroll} bottomOffset={20}>
         <View style={styles.brandRow}>
           <View style={styles.logoBox}><Text style={styles.logoChar}>R</Text></View>
-          <Text style={styles.brand}>RepReady</Text>
+          <Text style={styles.brand}>SalesReady</Text>
         </View>
 
         <Text style={styles.overline}>Sign in</Text>
@@ -80,7 +80,7 @@ export default function SignIn() {
 
         <View style={styles.divider} />
 
-        <Text style={styles.muted}>New to RepReady?</Text>
+        <Text style={styles.muted}>New to SalesReady?</Text>
         <TouchableOpacity testID="signin-signup-link" style={styles.secondaryBtn} onPress={() => router.push("/(auth)/sign-up")}>
           <Text style={styles.secondaryBtnText}>Create an account</Text>
         </TouchableOpacity>
