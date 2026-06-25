@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 6 final retest of the Instagram (Composio) posting fix. ALL 22 pytest tests in /app/backend/tests/test_instagram_image_hosting.py PASS (22/22, 100%). The iteration-5 critical regression (UnboundLocalError on `_humanize_provider_error` in the LinkedIn URN exception branch) is RESOLVED: the helper is now defined at module scope in /app/backend/server.py (lines 1269-1297), BEFORE the `social_post` route at line 1300. Verified end-to-end through the public Cloudflare edge: POST /api/social/linkedin/post → HTTP 200 + content-type application/json + body {\"success\":false,\"platform\":\"linkedin\",\"error\":\"No linkedin account connected. Please connect linkedin in Settings.\"}; POST /api/social/instagram/post with image_b64 → HTTP 200 + content-type application/json + body {\"success\":false,\"platform\":\"instagram\",\"error\":\"No instagram account connected. Please connect instagram in Settings.\"}. No more 500 + text/plain. No HTML edge rewrite. Public image route confirmed for ISO future, legacy tz-naive future, ISO expired (410), legacy tz-naive expired (410), and unknown id (404). All validation 400s intact. Backend ready for production.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/social/{platform}/status", "issue": "Pre-existing quirk (carried over from iteration 5, NOT introduced here): with a user that has zero connections, the endpoint may return `connected: true, connection_id: null` due to over-eager fallback `items = getattr(result, 'items', None) or list(result or [])` at server.py:1219. Out of scope for this iteration; tests assert shape only."},
+      {"endpoint": "/app/backend/server.py size", "issue": "server.py is 1731 lines, exceeds the 700-line guideline. Consider splitting social/* and public_images/* into routers. Non-blocking."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_instagram_image_hosting.py",
+    "/app/test_reports/pytest/instagram_image_hosting.xml"
+  ],
+  "action_items": [
+    "[OPTIONAL/LOW] Fix the pre-existing `connected:true` quirk at server.py:1219 — replace `items = getattr(result, 'items', None) or list(result or [])` with explicit hasattr+empty-list handling.",
+    "[OPTIONAL/LOW] Consider extracting social-post and public-images endpoints from server.py into separate routers to keep the module under 700 lines."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1269-1297 — `_humanize_provider_error` correctly hoisted to module scope. Both `except HTTPException` (line ~1334 area) and `except Exception` branches in `social_post` can now reference it safely. iteration-5 UnboundLocalError fully resolved.",
+    "server.py:1304 — `_require_social_config(platform)` runs before any try/except, which correctly raises 400 for missing config (validated by tests). Good.",
+    "server.py — overall file is 1731 lines; non-blocking but worth queuing a split."
+  ],
+  "updated_files": [
+    "/app/test_reports/iteration_6.json (this file)",
+    "/app/test_reports/pytest/instagram_image_hosting.xml (regenerated, 22/22 pass)"
+  ],
+  "success_rate": {"backend": "22/22 (100%) — all tests pass. LinkedIn JSON envelope verified through edge. Instagram JSON envelope verified through edge. Public image route covers ISO future/expired, legacy naive future/expired, unknown id. Validation 400s intact.", "frontend": "not tested (backend-only retest per request)"},
+  "seed_data_creation": "Tests insert ephemeral docs into `public_images` (id prefixes TEST_, TEST_EXP_, TEST_LEGACY_, TEST_LEGACY_EXP_, TEST_EDGE_) and `scheduled_posts` (content prefix TEST_scheduled_ig). All deleted in finally blocks. Throwaway X-User-Id per session — no Composio connected accounts created. Live edge POSTs to /api/social/instagram/post during TestEdgePreservesJsonBody do create real `public_images` docs (TTL 2h, self-expiring).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration-5 critical regression (UnboundLocalError on `_humanize_provider_error`) is RESOLVED. Helper is at module scope (server.py:1269-1297), social_post route at line 1300 — order is correct. All 22 tests in /app/backend/tests/test_instagram_image_hosting.py pass. Both LinkedIn and Instagram provider-failure paths verified through Cloudflare edge return HTTP 200 + application/json + {success:false, platform, error}. No further backend retest needed. Pre-existing minor quirks (status endpoint `connected:true` fallback, server.py file size >700 lines) remain but are non-blocking. End-to-end posting with a REAL connected Composio account still requires a human run; cannot be automated.",
+  "rca_of_issue": "Iteration-5 bug REPRODUCED: `_humanize_provider_error` was a nested `def` inside `social_post`, but was called from `except` branches BEFORE its def line executed → UnboundLocalError → FastAPI default 500 + text/plain. FIX APPLIED (verified in iteration 6): the helper was hoisted to module scope at server.py:1269-1297 (above `social_post` at line 1300). VERIFICATION (this iteration): (1) Direct curl through public edge confirms 200 + application/json + correct JSON envelope for both LinkedIn and Instagram. (2) Full pytest suite (22 tests covering validation 400s, public image route 200/410/404 for ISO + legacy naive, IG provider-failure via image_b64 and via data:-URI-as-image_url, LinkedIn provider-failure, edge-preservation through Cloudflare, scheduled post round-trip with platforms:['instagram'], status/accounts endpoints for all 3 platforms, and HTTPS env validation) all pass. (3) No regressions introduced. Bug fully closed."
+}

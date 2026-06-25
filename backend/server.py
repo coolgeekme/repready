@@ -1266,6 +1266,37 @@ async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
         raise HTTPException(status_code=502, detail=f"Composio error: {e}")
 
 
+def _humanize_provider_error(raw: Any, platform: str) -> str:
+    """Convert a raw Composio/HTTP error into a short, user-friendly sentence.
+    Module-level so it can be referenced from any branch of social_post / scheduler.
+    """
+    s = str(raw or "")
+    s_low = s.lower()
+    if "<html" in s_low or "<!doctype" in s_low or "cloudflare" in s_low or "bad gateway" in s_low:
+        return (f"{platform.capitalize()} is temporarily unreachable (gateway returned an HTML error). "
+                "Please try again in a minute.")
+    if "connectedaccountnotfound" in s_low or "no connected account" in s_low:
+        return f"No {platform} account connected. Please connect {platform} in Settings."
+    if "invalid request data" in s_low or "invalid_request" in s_low:
+        if platform == "instagram":
+            return ("Instagram rejected the post. Make sure you're connected to an Instagram Business or "
+                    "Creator account and that the image is a JPG/PNG under 8MB.")
+        if platform == "facebook":
+            return ("Facebook rejected the post. The connected account must be a Facebook Page "
+                    "(not a personal profile).")
+        return f"{platform.capitalize()} rejected the request. Please check your content and try again."
+    if platform == "facebook" and ("page_id" in s_low or ("page" in s_low and "permission" in s_low)):
+        return ("Facebook requires posting to a Page (not a personal profile). "
+                "Please reconnect Facebook and grant page permissions.")
+    if platform == "instagram" and ("ig_user_id" in s_low or "creation_id" in s_low or "business" in s_low):
+        return ("Instagram requires a Business or Creator account linked to a Facebook Page. "
+                "Reconnect Instagram via Settings.")
+    # Trim runaway whitespace and HTML noise
+    clean = re.sub(r"\s+", " ", s).strip()
+    clean = re.sub(r"<[^>]+>", "", clean)
+    return clean[:280] if clean else f"{platform.capitalize()} posting failed."
+
+
 @api_router.post("/social/{platform}/post")
 async def social_post(platform: str, payload: Dict[str, Any], request: Request, user_id: str = Depends(get_user_id)):
     if platform not in SOCIAL_POST_TOOLS:
@@ -1349,33 +1380,6 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
             arguments=args,
             dangerously_skip_version_check=True,
         )
-
-    def _humanize_provider_error(raw: Any, platform: str) -> str:
-        s = str(raw or "")
-        s_low = s.lower()
-        if "<html" in s_low or "<!doctype" in s_low or "cloudflare" in s_low:
-            return (f"{platform.capitalize()} is temporarily unreachable (gateway returned an HTML error). "
-                    "Please try again in a minute.")
-        if "invalid request data" in s_low or "invalid_request" in s_low:
-            if platform == "instagram":
-                return ("Instagram rejected the post. Make sure you're connected to an Instagram Business or "
-                        "Creator account and that the image is a JPG/PNG under 8MB.")
-            if platform == "facebook":
-                return ("Facebook rejected the post. The connected account must be a Facebook Page "
-                        "(not a personal profile).")
-            return f"{platform.capitalize()} rejected the request. Please check your content and try again."
-        if "connectedaccountnotfound" in s_low or "no connected account" in s_low:
-            return f"No {platform} account connected. Please connect {platform} in Settings."
-        if platform == "facebook" and ("page_id" in s_low or "page" in s_low and "permission" in s_low):
-            return ("Facebook requires posting to a Page (not a personal profile). "
-                    "Please reconnect Facebook and grant page permissions.")
-        if platform == "instagram" and ("ig_user_id" in s_low or "creation_id" in s_low or "business" in s_low):
-            return ("Instagram requires a Business or Creator account linked to a Facebook Page. "
-                    "Reconnect Instagram via Settings.")
-        # Trim runaway whitespace and HTML noise
-        clean = re.sub(r"\s+", " ", s).strip()
-        clean = re.sub(r"<[^>]+>", "", clean)
-        return clean[:280] if clean else f"{platform.capitalize()} posting failed."
 
     try:
         result = await asyncio.to_thread(_execute)
