@@ -7,6 +7,7 @@ async function authHeaders(): Promise<Record<string, string>> {
   return {
     "Content-Type": "application/json",
     "X-User-Id": user?.uid ?? "",
+    "X-User-Email": user?.email ?? "",
   };
 }
 
@@ -105,4 +106,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ company_name, company_website }),
     }),
+
+  // ---- Admin ----
+  adminListUsers: () => request<any>("/admin/users"),
+  adminGrantComp: (params: { email: string; duration_days?: number; until?: string; note?: string; tier?: string }) =>
+    request<any>("/admin/grant-comp", { method: "POST", body: JSON.stringify(params) }),
+  adminRevokeComp: (email: string) =>
+    request<any>("/admin/revoke-comp", { method: "POST", body: JSON.stringify({ email }) }),
 };

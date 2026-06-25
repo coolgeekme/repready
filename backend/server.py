@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: F401
 import httpx
@@ -41,12 +41,30 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- Auth dep ----------
-async def get_user_id(x_user_id: Optional[str] = Header(None)) -> str:
+async def get_user_id(
+    x_user_id: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+) -> str:
     """For MVP we trust the Firebase UID passed from the authenticated client.
     Firebase JS SDK is the source of truth for auth on the client.
+    If X-User-Email is also provided, we lazily seed it into the user doc so
+    admin/email-based features (comps, ADMIN_EMAILS) work from the first request.
     """
     if not x_user_id:
         raise HTTPException(status_code=401, detail="Missing X-User-Id header")
+    # Lazy email seed (fire-and-forget) — keeps user.email + is_admin in sync with client
+    if x_user_email:
+        try:
+            update_set: Dict[str, Any] = {"email": x_user_email}
+            if x_user_email.strip().lower() in ADMIN_EMAILS:
+                update_set["is_admin"] = True
+            await db.users.update_one(
+                {"user_id": x_user_id},
+                {"$set": update_set, "$setOnInsert": {"user_id": x_user_id}},
+                upsert=True,
+            )
+        except Exception as e:
+            logging.warning(f"Email seed failed for {x_user_id}: {e}")
     return x_user_id
 
 
@@ -70,6 +88,23 @@ class UserProfile(BaseModel):
     guidelines_file_b64: Optional[str] = None  # base64 PDF
     linkedin_connected: bool = False
     linkedin_connection_id: Optional[str] = None
+    # ---- Subscription / monetization fields (future-proofing for paywalls) ----
+    # subscription_tier: "free" | "pro" | "enterprise"
+    subscription_tier: str = "free"
+    # subscription_source: where the entitlement comes from. "none" | "apple" | "stripe" | "admin_comp"
+    subscription_source: str = "none"
+    # When the paid subscription expires (ISO datetime, UTC). None == no active paid sub.
+    subscription_expires_at: Optional[datetime] = None
+    # Apple receipt anchor (used to dedupe + validate IAP receipts when we add StoreKit)
+    apple_original_transaction_id: Optional[str] = None
+    # Stripe customer (for any web/B2B Stripe billing)
+    stripe_customer_id: Optional[str] = None
+    # Admin-granted comp until this datetime — overrides everything. Used for friends/family.
+    admin_comp_until: Optional[datetime] = None
+    # Reason/notes attached to last admin grant (e.g. "Beta tester", "Family")
+    admin_comp_note: Optional[str] = None
+    # Is THIS user an admin (can grant comps)? Set via ADMIN_EMAILS env on first login.
+    is_admin: bool = False
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -131,6 +166,79 @@ class HistoryItem(BaseModel):
 async def _get_profile(user_id: str) -> Dict[str, Any]:
     doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
     return doc or {"user_id": user_id}
+
+
+# ---------- Admin / Subscription helpers ----------
+ADMIN_EMAILS = {e.strip().lower() for e in (os.environ.get("ADMIN_EMAILS") or "").split(",") if e.strip()}
+
+
+async def _ensure_admin_flag(user_id: str, email: Optional[str]) -> bool:
+    """Set is_admin=True on first login if the user's email is in ADMIN_EMAILS env."""
+    if not email or not ADMIN_EMAILS:
+        return False
+    if email.strip().lower() in ADMIN_EMAILS:
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_admin": True, "email": email, "user_id": user_id}},
+            upsert=True,
+        )
+        return True
+    return False
+
+
+async def _require_admin(user_id: str) -> Dict[str, Any]:
+    profile = await _get_profile(user_id)
+    if not profile.get("is_admin"):
+        # As a convenience, re-check email against env every call (handles env additions without re-login)
+        if await _ensure_admin_flag(user_id, profile.get("email")):
+            profile = await _get_profile(user_id)
+    if not profile.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return profile
+
+
+def _has_active_entitlement(profile: Dict[str, Any]) -> bool:
+    """Return True if user has paid sub OR admin-granted comp that hasn't expired."""
+    now = datetime.now(timezone.utc)
+    # Admin comp wins
+    ac = profile.get("admin_comp_until")
+    if isinstance(ac, str):
+        try: ac = datetime.fromisoformat(ac.replace("Z", "+00:00"))
+        except Exception: ac = None
+    if ac and ac > now:
+        return True
+    # Paid subscription
+    if profile.get("subscription_tier") in ("pro", "enterprise"):
+        exp = profile.get("subscription_expires_at")
+        if isinstance(exp, str):
+            try: exp = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            except Exception: exp = None
+        if exp is None or exp > now:
+            return True
+    return False
+
+
+def _entitlement_summary(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Lightweight summary to return alongside profile so the client can paywall correctly."""
+    now = datetime.now(timezone.utc)
+    ac = profile.get("admin_comp_until")
+    if isinstance(ac, str):
+        try: ac = datetime.fromisoformat(ac.replace("Z", "+00:00"))
+        except Exception: ac = None
+    exp = profile.get("subscription_expires_at")
+    if isinstance(exp, str):
+        try: exp = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+        except Exception: exp = None
+    is_comped = bool(ac and ac > now)
+    is_paid = profile.get("subscription_tier") in ("pro", "enterprise") and (exp is None or exp > now)
+    return {
+        "is_admin": bool(profile.get("is_admin")),
+        "tier": profile.get("subscription_tier") or "free",
+        "source": "admin_comp" if is_comped else (profile.get("subscription_source") or "none"),
+        "active": is_paid or is_comped,
+        "expires_at": (ac if is_comped else exp).isoformat() if (ac if is_comped else exp) else None,
+        "note": profile.get("admin_comp_note") if is_comped else None,
+    }
 
 
 async def _get_active_company(user_id: str) -> Optional[Dict[str, Any]]:
@@ -311,6 +419,12 @@ async def root():
 @api_router.get("/users/profile")
 async def get_profile(user_id: str = Depends(get_user_id)):
     profile = await _get_profile(user_id)
+    # Auto-seed admin flag from ADMIN_EMAILS env (idempotent)
+    if profile.get("email") and not profile.get("is_admin"):
+        if await _ensure_admin_flag(user_id, profile.get("email")):
+            profile = await _get_profile(user_id)
+    # Attach lightweight entitlement summary so the client knows tier + paywall state
+    profile["entitlement"] = _entitlement_summary(profile)
     return profile
 
 
@@ -320,8 +434,106 @@ async def update_profile(payload: ProfileUpdate, user_id: str = Depends(get_user
     update["updated_at"] = datetime.now(timezone.utc).isoformat()
     update["user_id"] = user_id
     await db.users.update_one({"user_id": user_id}, {"$set": update}, upsert=True)
+    # Re-check admin status if email was just set/changed
+    if payload.email:
+        await _ensure_admin_flag(user_id, payload.email)
     profile = await _get_profile(user_id)
+    profile["entitlement"] = _entitlement_summary(profile)
     return profile
+
+
+# ---------- Routes: Admin (entitlement comp management) ----------
+class GrantCompRequest(BaseModel):
+    email: str  # The target user's email (case-insensitive lookup)
+    duration_days: Optional[int] = 365  # Default 1 year comp
+    until: Optional[str] = None  # ISO datetime — overrides duration_days
+    note: Optional[str] = None  # e.g. "Family", "Beta tester"
+    tier: Optional[str] = "pro"  # "pro" or "enterprise"
+
+
+@api_router.get("/admin/users")
+async def admin_list_users(user_id: str = Depends(get_user_id)):
+    """List all users with their entitlement summary."""
+    await _require_admin(user_id)
+    cur = db.users.find({}, {"_id": 0}).sort("updated_at", -1).limit(500)
+    items = []
+    async for u in cur:
+        items.append({
+            "user_id": u.get("user_id"),
+            "email": u.get("email"),
+            "display_name": u.get("display_name"),
+            "is_admin": bool(u.get("is_admin")),
+            "entitlement": _entitlement_summary(u),
+        })
+    return {"items": items, "admin_emails_env": sorted(ADMIN_EMAILS)}
+
+
+@api_router.post("/admin/grant-comp")
+async def admin_grant_comp(payload: GrantCompRequest, user_id: str = Depends(get_user_id)):
+    """Grant a free 'admin comp' subscription to a user by email."""
+    await _require_admin(user_id)
+    if not payload.email:
+        raise HTTPException(status_code=400, detail="email required")
+
+    # Find user by email (case-insensitive)
+    email_lower = payload.email.strip().lower()
+    target = await db.users.find_one({"email": {"$regex": f"^{email_lower}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail=f"No user with email {payload.email}")
+
+    # Compute the "until" timestamp
+    if payload.until:
+        try:
+            until_dt = datetime.fromisoformat(payload.until.replace("Z", "+00:00"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="until must be ISO datetime")
+    else:
+        days = payload.duration_days or 365
+        until_dt = datetime.now(timezone.utc) + timedelta(days=days)
+
+    tier = payload.tier or "pro"
+    if tier not in ("pro", "enterprise"):
+        raise HTTPException(status_code=400, detail="tier must be 'pro' or 'enterprise'")
+
+    await db.users.update_one(
+        {"user_id": target["user_id"]},
+        {"$set": {
+            "admin_comp_until": until_dt.isoformat(),
+            "admin_comp_note": payload.note or f"Granted by {user_id}",
+            "subscription_tier": tier,
+            "subscription_source": "admin_comp",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=False,
+    )
+    updated = await _get_profile(target["user_id"])
+    return {
+        "ok": True,
+        "user_id": target["user_id"],
+        "email": target.get("email"),
+        "entitlement": _entitlement_summary(updated),
+    }
+
+
+@api_router.post("/admin/revoke-comp")
+async def admin_revoke_comp(payload: GrantCompRequest, user_id: str = Depends(get_user_id)):
+    """Revoke a previously granted comp (sets admin_comp_until to now, drops back to free)."""
+    await _require_admin(user_id)
+    email_lower = payload.email.strip().lower()
+    target = await db.users.find_one({"email": {"$regex": f"^{email_lower}$", "$options": "i"}}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail=f"No user with email {payload.email}")
+    await db.users.update_one(
+        {"user_id": target["user_id"]},
+        {"$set": {
+            "admin_comp_until": None,
+            "admin_comp_note": None,
+            "subscription_tier": "free",
+            "subscription_source": "none",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    return {"ok": True, "user_id": target["user_id"], "email": target.get("email")}
 
 
 # ---------- Routes: Generators ----------

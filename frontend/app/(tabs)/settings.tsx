@@ -303,6 +303,23 @@ export default function Settings() {
           <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
 
+        {/* Admin shortcut (only visible to admins) */}
+        {profile.is_admin && (
+          <TouchableOpacity
+            testID="settings-admin-link"
+            style={styles.adminLink}
+            onPress={() => router.push("/admin")}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="shield-checkmark" size={18} color="#7c3aed" />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.adminLinkTitle}>Admin · Comps</Text>
+              <Text style={styles.adminLinkDesc}>Grant free Pro access to friends &amp; family</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.textSubtle} />
+          </TouchableOpacity>
+        )}
+
         {toast && (
           <View testID="settings-toast" style={styles.toast}>
             <Text style={styles.toastText}>{toast}</Text>
@@ -402,6 +419,10 @@ const styles = StyleSheet.create({
 
   signOut: { flexDirection: "row", alignItems: "center", gap: 8, justifyContent: "center", marginTop: spacing.xl, padding: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm },
   signOutText: { color: colors.error, fontWeight: "700" },
+
+  adminLink: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10, padding: 14, borderRadius: radii.sm, borderWidth: 1, borderColor: "#7c3aed", backgroundColor: "#F3E8FF" },
+  adminLinkTitle: { color: "#7c3aed", fontWeight: "800", fontSize: 14 },
+  adminLinkDesc: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
 
   toast: { position: "absolute", bottom: 30, left: 0, right: 0, alignItems: "center" },
   toastText: { backgroundColor: colors.black, color: "#fff", paddingHorizontal: 16, paddingVertical: 10, borderRadius: radii.sm, overflow: "hidden", fontWeight: "600" },
