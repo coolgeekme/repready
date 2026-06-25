@@ -71,11 +71,19 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ platform, connected_account_id }),
     }),
-  socialPost: (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string }) =>
-    request<any>(`/social/${platform}/post`, {
+  socialPost: async (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string }) => {
+    const res = await request<any>(`/social/${platform}/post`, {
       method: "POST",
       body: JSON.stringify({ content, ...(options || {}) }),
-    }),
+    });
+    // Backend now returns 200 with {success:false, error} for provider failures so that
+    // edge proxies don't rewrite a 5xx body into raw HTML. Surface them as exceptions
+    // so existing call-sites display the friendly error text.
+    if (res && res.success === false) {
+      throw new Error(res.error || `Couldn't post to ${platform}.`);
+    }
+    return res;
+  },
 
   // Image generation
   generatePostImage: (body: { hook?: string; body?: string; prompt?: string }) =>

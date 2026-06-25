@@ -1003,12 +1003,13 @@ async def _host_public_image(image_b64: str, image_mime: str, request: Optional[
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=2)
     try:
+        # Store expires_at as ISO string for tz-safe comparisons (motor returns naive datetimes by default)
         await db.public_images.insert_one({
             "id": img_id,
             "data": img_bytes,
             "mime": (image_mime or "image/png"),
             "created_at": now.isoformat(),
-            "expires_at": expires_at,
+            "expires_at": expires_at.isoformat(),
         })
     except Exception as e:
         logger.error(f"_host_public_image: insert failed: {e}")
@@ -1023,8 +1024,21 @@ async def get_public_social_image(img_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
     exp = doc.get("expires_at")
-    if isinstance(exp, datetime) and exp < datetime.now(timezone.utc):
-        # Cleanup the expired doc
+    expired = False
+    if isinstance(exp, str):
+        try:
+            exp_dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            expired = exp_dt < datetime.now(timezone.utc)
+        except Exception:
+            expired = False
+    elif isinstance(exp, datetime):
+        # Defensive: normalize naive datetimes (motor default) to UTC
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        expired = exp < datetime.now(timezone.utc)
+    if expired:
         try:
             await db.public_images.delete_one({"id": img_id})
         except Exception:
@@ -1293,11 +1307,12 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
     if platform == "linkedin":
         try:
             author_urn = await _linkedin_get_author_urn(user_id)
-        except HTTPException:
-            raise
+        except HTTPException as he:
+            # URN fetch may raise its own 502 — convert to clean success:false JSON
+            return {"success": False, "platform": platform, "error": str(he.detail)[:280]}
         except Exception as e:
             logger.error(f"LinkedIn URN fetch failed: {e}")
-            raise HTTPException(status_code=502, detail=f"Couldn't read LinkedIn profile: {e}")
+            return {"success": False, "platform": platform, "error": _humanize_provider_error(e, platform)}
 
         args: Dict[str, Any] = {"author": author_urn, "commentary": content}
         if image_b64:
@@ -1378,7 +1393,8 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
         if not success:
             msg = _humanize_provider_error(err_payload or result, platform)
             logger.error(f"Composio {platform} post failed (provider): {str(err_payload)[:500]}")
-            raise HTTPException(status_code=502, detail=msg)
+            # Return 200 with success:false so reverse-proxy / edge layers don't rewrite the body
+            return {"success": False, "platform": platform, "error": msg}
         # Mark history item as posted to this platform
         if history_id:
             await db.history.update_one(
@@ -1391,7 +1407,8 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
     except Exception as e:
         clean = _humanize_provider_error(e, platform)
         logger.error(f"Composio {platform} post failed: {e}")
-        raise HTTPException(status_code=502, detail=clean)
+        # Return 200 with success:false (avoid 5xx so the edge proxy doesn't replace body with HTML)
+        return {"success": False, "platform": platform, "error": clean}
 
 
 @api_router.post("/social/{platform}/disconnect")
