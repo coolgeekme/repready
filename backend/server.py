@@ -941,65 +941,54 @@ async def _composio_call(user_id: str, slug: str, arguments: Dict[str, Any], con
     return {"success": bool(successful), "data": norm.get("data"), "error_raw": err if not successful else None, "raw": result}
 
 
-async def _instagram_get_user_id(user_id: str, connected_account_id: Optional[str] = None) -> Optional[str]:
+async def _instagram_get_user_id(user_id: str, connected_account_id: Optional[str] = None) -> Dict[str, Any]:
     """Return (and cache) the Instagram Business/Creator account ID for the user.
-    Calls INSTAGRAM_GET_USER_INFO via Composio and stores the result on the user doc.
+    Returns {"id": str|None, "error": str|None} so callers can surface the right reason
+    (e.g. distinguish "no account connected" from "Business account missing").
     """
-    # Try cache first (per connected account, falling back to per-user)
     cache_key = connected_account_id or "_default"
     user_doc = await db.users.find_one({"user_id": user_id}) or {}
     cached = ((user_doc.get("instagram_user_ids") or {}).get(cache_key))
     if cached:
-        return cached
+        return {"id": cached, "error": None}
 
-    # Discover
+    # Discover (single primary slug; fallbacks removed since the SDK reliably exposes this one).
     res = await _composio_call(user_id, "INSTAGRAM_GET_USER_INFO", {}, connected_account_id=connected_account_id)
     if not res["success"]:
-        # Try a couple of alternative slugs that older composio versions may expose
-        for alt in ("INSTAGRAM_USER_INFO", "INSTAGRAM_GET_PROFILE", "INSTAGRAM_ME"):
-            res = await _composio_call(user_id, alt, {}, connected_account_id=connected_account_id)
-            if res["success"]:
-                break
-    if not res["success"]:
         logger.error(f"Instagram user discovery failed: {res.get('error_raw')}")
-        return None
+        return {"id": None, "error": str(res.get("error_raw") or "")}
 
     ig_id = _extract_first(res["data"], ["ig_user_id", "instagram_business_account_id", "instagram_id", "user_id", "id"])
     if not ig_id:
         logger.error(f"Instagram user_id not found in response: {res['data']}")
-        return None
+        return {"id": None, "error": "no_business_account"}
     ig_id = str(ig_id)
     await db.users.update_one(
         {"user_id": user_id},
         {"$set": {f"instagram_user_ids.{cache_key}": ig_id, "user_id": user_id}},
         upsert=True,
     )
-    return ig_id
+    return {"id": ig_id, "error": None}
 
 
-async def _facebook_get_page_id(user_id: str, connected_account_id: Optional[str] = None) -> Optional[str]:
-    """Return (and cache) the user's first managed Facebook Page ID."""
+async def _facebook_get_page_id(user_id: str, connected_account_id: Optional[str] = None) -> Dict[str, Any]:
+    """Return (and cache) the user's first managed Facebook Page ID.
+    Returns {"id": str|None, "error": str|None}.
+    """
     cache_key = connected_account_id or "_default"
     user_doc = await db.users.find_one({"user_id": user_id}) or {}
     cached = ((user_doc.get("facebook_page_ids") or {}).get(cache_key))
     if cached:
-        return cached
+        return {"id": cached, "error": None}
 
     res = await _composio_call(user_id, "FACEBOOK_LIST_MANAGED_PAGES", {}, connected_account_id=connected_account_id)
     if not res["success"]:
-        for alt in ("FACEBOOK_GET_PAGES", "FACEBOOK_LIST_PAGES", "FACEBOOK_PAGES_LIST"):
-            res = await _composio_call(user_id, alt, {}, connected_account_id=connected_account_id)
-            if res["success"]:
-                break
-    if not res["success"]:
         logger.error(f"Facebook page discovery failed: {res.get('error_raw')}")
-        return None
+        return {"id": None, "error": str(res.get("error_raw") or "")}
 
-    # Try to extract a page id from common response shapes
     page_id: Optional[Any] = None
     data = res["data"]
     if isinstance(data, dict):
-        # Common containers: {data: [{id: ..}]}, {pages: [{id:..}]}, {items: [...]}
         for key in ("data", "pages", "items", "result"):
             if isinstance(data.get(key), list) and data[key]:
                 page_id = data[key][0].get("id") if isinstance(data[key][0], dict) else None
@@ -1015,14 +1004,14 @@ async def _facebook_get_page_id(user_id: str, connected_account_id: Optional[str
         page_id = _extract_first(data, ["page_id", "id"])
     if not page_id:
         logger.error(f"Facebook page_id not found in response: {data}")
-        return None
+        return {"id": None, "error": "no_managed_page"}
     page_id = str(page_id)
     await db.users.update_one(
         {"user_id": user_id},
         {"$set": {f"facebook_page_ids.{cache_key}": page_id, "user_id": user_id}},
         upsert=True,
     )
-    return page_id
+    return {"id": page_id, "error": None}
 
 
 def _build_post_args(platform: str, content: str, image_url: Optional[str], author_urn: Optional[str]) -> Dict[str, Any]:
@@ -1471,10 +1460,18 @@ async def _post_to_instagram(user_id: str, caption: str, image_url: str, connect
     if not image_url:
         return {"success": False, "platform": "instagram", "error": "Instagram requires an image."}
 
-    ig_user_id = await _instagram_get_user_id(user_id, connected_account_id)
+    ig = await _instagram_get_user_id(user_id, connected_account_id)
+    ig_user_id = ig.get("id")
     if not ig_user_id:
-        return {"success": False, "platform": "instagram",
-                "error": "Couldn't fetch your Instagram Business account ID. Make sure your Instagram is linked to a Facebook Page and reconnect Instagram in Settings."}
+        raw = ig.get("error") or ""
+        low = str(raw).lower()
+        if "connectedaccountnotfound" in low or "no connected account" in low:
+            msg = "No Instagram account connected. Please connect Instagram in Settings."
+        elif ig.get("error") == "no_business_account":
+            msg = "Your Instagram account isn't a Business or Creator account. Convert it (or link it to a Facebook Page) and reconnect Instagram."
+        else:
+            msg = "Couldn't fetch your Instagram Business account ID. Reconnect Instagram in Settings and make sure it's a Business/Creator account linked to a Facebook Page."
+        return {"success": False, "platform": "instagram", "error": msg}
 
     # Phase 1: container creation
     container = await _composio_call(
@@ -1517,10 +1514,18 @@ async def _post_to_facebook(user_id: str, message: str, image_url: Optional[str]
     Picks the user's first managed page (cached on the user doc). For posts that include
     an image we use FACEBOOK_CREATE_PHOTO_POST; text-only posts go through FACEBOOK_CREATE_POST.
     """
-    page_id = await _facebook_get_page_id(user_id, connected_account_id)
+    page = await _facebook_get_page_id(user_id, connected_account_id)
+    page_id = page.get("id")
     if not page_id:
-        return {"success": False, "platform": "facebook",
-                "error": "Couldn't find a managed Facebook Page on your account. Make sure you're an admin of a Page and reconnect Facebook."}
+        raw = page.get("error") or ""
+        low = str(raw).lower()
+        if "connectedaccountnotfound" in low or "no connected account" in low:
+            msg = "No Facebook account connected. Please connect Facebook in Settings."
+        elif page.get("error") == "no_managed_page":
+            msg = "We couldn't find any Facebook Page you manage. Posting requires admin access to a Page (not a personal profile)."
+        else:
+            msg = "Couldn't find a managed Facebook Page on your account. Make sure you're an admin of a Page and reconnect Facebook."
+        return {"success": False, "platform": "facebook", "error": msg}
 
     if image_url:
         slug = "FACEBOOK_CREATE_PHOTO_POST"
