@@ -864,14 +864,179 @@ SOCIAL_POST_TOOLS: Dict[str, Dict[str, Any]] = {
         "needs_image": False,
     },
     "facebook": {
+        # Text-only slug; photo posts use FACEBOOK_CREATE_PHOTO_POST instead.
         "slug": "FACEBOOK_CREATE_POST",
         "needs_image": False,
     },
     "instagram": {
+        # Note: Instagram is a TWO-PHASE flow (container -> publish). The slug here is
+        # the publish step; we orchestrate INSTAGRAM_CREATE_MEDIA_CONTAINER first.
         "slug": "INSTAGRAM_CREATE_POST",
         "needs_image": True,
     },
 }
+
+
+def _extract_first(d: Any, keys: List[str]) -> Optional[Any]:
+    """Walk a Composio response and return the first non-empty value found under one of `keys`."""
+    if d is None:
+        return None
+    if isinstance(d, dict):
+        for k in keys:
+            if k in d and d[k] not in (None, "", []):
+                return d[k]
+        for v in d.values():
+            r = _extract_first(v, keys)
+            if r:
+                return r
+    elif isinstance(d, list):
+        for item in d:
+            r = _extract_first(item, keys)
+            if r:
+                return r
+    return None
+
+
+def _composio_to_dict(result: Any) -> Dict[str, Any]:
+    """Convert a Composio ToolExecuteResponse (or dict) into a plain dict for parsing."""
+    if isinstance(result, dict):
+        return result
+    out: Dict[str, Any] = {}
+    for attr in ("data", "error", "successful", "logs"):
+        try:
+            v = getattr(result, attr, None)
+            if v is not None:
+                out[attr] = v
+        except Exception:
+            pass
+    return out
+
+
+async def _composio_call(user_id: str, slug: str, arguments: Dict[str, Any], connected_account_id: Optional[str] = None) -> Dict[str, Any]:
+    """Run a Composio tool call and return a normalized dict {success, data, error_raw}.
+    The SDK raises BadRequestError / other exceptions on failure; we trap them and
+    surface a uniform success:false shape so callers never have to try/except.
+    """
+    import asyncio
+    def _exec():
+        client = _composio_client()
+        kwargs: Dict[str, Any] = {
+            "user_id": user_id,
+            "slug": slug,
+            "arguments": arguments,
+            "dangerously_skip_version_check": True,
+        }
+        if connected_account_id:
+            kwargs["connected_account_id"] = connected_account_id
+        return client.tools.execute(**kwargs)
+    try:
+        result = await asyncio.to_thread(_exec)
+    except Exception as e:
+        return {"success": False, "data": None, "error_raw": e, "raw": None}
+    norm = _composio_to_dict(result)
+    successful = norm.get("successful")
+    if successful is None:
+        successful = True
+    err = norm.get("error") if not successful else None
+    return {"success": bool(successful), "data": norm.get("data"), "error_raw": err if not successful else None, "raw": result}
+
+
+async def _instagram_get_user_id(user_id: str, connected_account_id: Optional[str] = None) -> Optional[str]:
+    """Return (and cache) the Instagram Business/Creator account ID for the user.
+    Calls INSTAGRAM_GET_USER_INFO via Composio and stores the result on the user doc.
+    """
+    # Try cache first (per connected account, falling back to per-user)
+    cache_key = connected_account_id or "_default"
+    user_doc = await db.users.find_one({"user_id": user_id}) or {}
+    cached = ((user_doc.get("instagram_user_ids") or {}).get(cache_key))
+    if cached:
+        return cached
+
+    # Discover
+    res = await _composio_call(user_id, "INSTAGRAM_GET_USER_INFO", {}, connected_account_id=connected_account_id)
+    if not res["success"]:
+        # Try a couple of alternative slugs that older composio versions may expose
+        for alt in ("INSTAGRAM_USER_INFO", "INSTAGRAM_GET_PROFILE", "INSTAGRAM_ME"):
+            res = await _composio_call(user_id, alt, {}, connected_account_id=connected_account_id)
+            if res["success"]:
+                break
+    if not res["success"]:
+        logger.error(f"Instagram user discovery failed: {res.get('error_raw')}")
+        return None
+
+    ig_id = _extract_first(res["data"], ["ig_user_id", "instagram_business_account_id", "instagram_id", "user_id", "id"])
+    if not ig_id:
+        logger.error(f"Instagram user_id not found in response: {res['data']}")
+        return None
+    ig_id = str(ig_id)
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {f"instagram_user_ids.{cache_key}": ig_id, "user_id": user_id}},
+        upsert=True,
+    )
+    return ig_id
+
+
+async def _facebook_get_page_id(user_id: str, connected_account_id: Optional[str] = None) -> Optional[str]:
+    """Return (and cache) the user's first managed Facebook Page ID."""
+    cache_key = connected_account_id or "_default"
+    user_doc = await db.users.find_one({"user_id": user_id}) or {}
+    cached = ((user_doc.get("facebook_page_ids") or {}).get(cache_key))
+    if cached:
+        return cached
+
+    res = await _composio_call(user_id, "FACEBOOK_LIST_MANAGED_PAGES", {}, connected_account_id=connected_account_id)
+    if not res["success"]:
+        for alt in ("FACEBOOK_GET_PAGES", "FACEBOOK_LIST_PAGES", "FACEBOOK_PAGES_LIST"):
+            res = await _composio_call(user_id, alt, {}, connected_account_id=connected_account_id)
+            if res["success"]:
+                break
+    if not res["success"]:
+        logger.error(f"Facebook page discovery failed: {res.get('error_raw')}")
+        return None
+
+    # Try to extract a page id from common response shapes
+    page_id: Optional[Any] = None
+    data = res["data"]
+    if isinstance(data, dict):
+        # Common containers: {data: [{id: ..}]}, {pages: [{id:..}]}, {items: [...]}
+        for key in ("data", "pages", "items", "result"):
+            if isinstance(data.get(key), list) and data[key]:
+                page_id = data[key][0].get("id") if isinstance(data[key][0], dict) else None
+                if page_id:
+                    break
+        if not page_id:
+            page_id = data.get("id") or data.get("page_id")
+    elif isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict):
+            page_id = first.get("id") or first.get("page_id")
+    if not page_id:
+        page_id = _extract_first(data, ["page_id", "id"])
+    if not page_id:
+        logger.error(f"Facebook page_id not found in response: {data}")
+        return None
+    page_id = str(page_id)
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {f"facebook_page_ids.{cache_key}": page_id, "user_id": user_id}},
+        upsert=True,
+    )
+    return page_id
+
+
+def _build_post_args(platform: str, content: str, image_url: Optional[str], author_urn: Optional[str]) -> Dict[str, Any]:
+    """Legacy helper kept for the scheduler/back-compat. New code should call the
+    posting helpers directly which handle platform-specific multi-step flows.
+    """
+    if platform == "linkedin":
+        return {"author": author_urn or "", "commentary": content}
+    if platform == "facebook":
+        # message is the Graph API field; some Composio tools alias as `text` but `message` is canonical.
+        return {"message": content}
+    if platform == "instagram":
+        return {"caption": content, "image_url": image_url or ""}
+    return {}
 
 
 async def _linkedin_upload_image(user_id: str, author_urn: str, image_b64: str, mimetype: str) -> Dict[str, str]:
@@ -1297,6 +1462,86 @@ def _humanize_provider_error(raw: Any, platform: str) -> str:
     return clean[:280] if clean else f"{platform.capitalize()} posting failed."
 
 
+async def _post_to_instagram(user_id: str, caption: str, image_url: str, connected_account_id: Optional[str], history_id: Optional[str]) -> Dict[str, Any]:
+    """Instagram requires a two-phase publish flow:
+       1) INSTAGRAM_CREATE_MEDIA_CONTAINER -> returns a creation_id (a.k.a. container id)
+       2) INSTAGRAM_CREATE_POST -> publishes the container.
+       Both need the user's `ig_user_id` which we discover (and cache) via INSTAGRAM_GET_USER_INFO.
+    """
+    if not image_url:
+        return {"success": False, "platform": "instagram", "error": "Instagram requires an image."}
+
+    ig_user_id = await _instagram_get_user_id(user_id, connected_account_id)
+    if not ig_user_id:
+        return {"success": False, "platform": "instagram",
+                "error": "Couldn't fetch your Instagram Business account ID. Make sure your Instagram is linked to a Facebook Page and reconnect Instagram in Settings."}
+
+    # Phase 1: container creation
+    container = await _composio_call(
+        user_id,
+        "INSTAGRAM_CREATE_MEDIA_CONTAINER",
+        {"ig_user_id": ig_user_id, "image_url": image_url, "caption": caption},
+        connected_account_id=connected_account_id,
+    )
+    if not container["success"]:
+        logger.error(f"Composio instagram container failed (provider): {str(container.get('error_raw'))[:500]}")
+        return {"success": False, "platform": "instagram", "error": _humanize_provider_error(container.get("error_raw"), "instagram")}
+
+    creation_id = _extract_first(container["data"], ["creation_id", "container_id", "id"])
+    if not creation_id:
+        logger.error(f"Instagram creation_id not found in container response: {container['data']}")
+        return {"success": False, "platform": "instagram", "error": "Instagram didn't return a media id. Please retry."}
+
+    # Phase 2: publish
+    publish = await _composio_call(
+        user_id,
+        "INSTAGRAM_CREATE_POST",
+        {"ig_user_id": ig_user_id, "creation_id": str(creation_id)},
+        connected_account_id=connected_account_id,
+    )
+    if not publish["success"]:
+        logger.error(f"Composio instagram publish failed (provider): {str(publish.get('error_raw'))[:500]}")
+        return {"success": False, "platform": "instagram", "error": _humanize_provider_error(publish.get("error_raw"), "instagram")}
+
+    if history_id:
+        await db.history.update_one(
+            {"id": history_id, "user_id": user_id},
+            {"$addToSet": {"posted_to": {"platform": "instagram", "posted_at": datetime.now(timezone.utc).isoformat()}}},
+        )
+    return {"success": True, "platform": "instagram", "with_image": True, "result": str(publish["data"])[:400]}
+
+
+async def _post_to_facebook(user_id: str, message: str, image_url: Optional[str], connected_account_id: Optional[str], history_id: Optional[str]) -> Dict[str, Any]:
+    """Post text or photo to a connected Facebook Page.
+
+    Picks the user's first managed page (cached on the user doc). For posts that include
+    an image we use FACEBOOK_CREATE_PHOTO_POST; text-only posts go through FACEBOOK_CREATE_POST.
+    """
+    page_id = await _facebook_get_page_id(user_id, connected_account_id)
+    if not page_id:
+        return {"success": False, "platform": "facebook",
+                "error": "Couldn't find a managed Facebook Page on your account. Make sure you're an admin of a Page and reconnect Facebook."}
+
+    if image_url:
+        slug = "FACEBOOK_CREATE_PHOTO_POST"
+        args = {"page_id": page_id, "message": message, "url": image_url}
+    else:
+        slug = "FACEBOOK_CREATE_POST"
+        args = {"page_id": page_id, "message": message}
+
+    res = await _composio_call(user_id, slug, args, connected_account_id=connected_account_id)
+    if not res["success"]:
+        logger.error(f"Composio facebook post failed (provider): {str(res.get('error_raw'))[:500]}")
+        return {"success": False, "platform": "facebook", "error": _humanize_provider_error(res.get("error_raw"), "facebook")}
+
+    if history_id:
+        await db.history.update_one(
+            {"id": history_id, "user_id": user_id},
+            {"$addToSet": {"posted_to": {"platform": "facebook", "posted_at": datetime.now(timezone.utc).isoformat()}}},
+        )
+    return {"success": True, "platform": "facebook", "with_image": bool(image_url), "result": str(res["data"])[:400]}
+
+
 @api_router.post("/social/{platform}/post")
 async def social_post(platform: str, payload: Dict[str, Any], request: Request, user_id: str = Depends(get_user_id)):
     if platform not in SOCIAL_POST_TOOLS:
@@ -1334,6 +1579,16 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
     if tool["needs_image"] and not image_url and not image_b64:
         raise HTTPException(status_code=400, detail=f"{platform} requires an image")
 
+    # Pick the connected account for the active company if set (multi-account support)
+    chosen_conn_id: Optional[str] = None
+    try:
+        active_company = await _get_active_company(user_id)
+        if active_company:
+            linked = active_company.get("linked_accounts") or {}
+            chosen_conn_id = linked.get(platform)
+    except Exception:
+        pass
+
     # LinkedIn-specific: build args with optional image upload
     if platform == "linkedin":
         try:
@@ -1356,63 +1611,60 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
                 logger.error(f"LinkedIn image upload failed: {e}")
                 # Continue with text-only rather than fail the whole post
                 args.pop("images", None)
-    else:
-        # Instagram (and Facebook with photo) require a publicly fetchable HTTPS URL.
-        # If we only have base64 bytes, host them on our backend and use that URL.
-        if platform in ("instagram", "facebook") and image_b64 and not image_url:
-            hosted = await _host_public_image(image_b64, image_mime, request)
-            if hosted:
-                image_url = hosted
-            elif platform == "instagram":
-                raise HTTPException(
-                    status_code=502,
-                    detail="Couldn't host the image publicly. Please retry — Instagram needs a public image URL.",
-                )
-        args = _build_post_args(platform, content, image_url, None)
 
-    slug = tool["slug"]
-    import asyncio
-    def _execute():
-        client = _composio_client()
-        return client.tools.execute(
-            user_id=user_id,
-            slug=slug,
-            arguments=args,
-            dangerously_skip_version_check=True,
-        )
+        slug = tool["slug"]
+        import asyncio
+        def _execute():
+            client = _composio_client()
+            kwargs: Dict[str, Any] = {
+                "user_id": user_id, "slug": slug, "arguments": args,
+                "dangerously_skip_version_check": True,
+            }
+            if chosen_conn_id:
+                kwargs["connected_account_id"] = chosen_conn_id
+            return client.tools.execute(**kwargs)
 
-    try:
-        result = await asyncio.to_thread(_execute)
-        success = True
-        err_payload: Any = None
         try:
-            if hasattr(result, "successful"):
-                success = bool(result.successful)
-                err_payload = getattr(result, "error", None) or getattr(result, "data", None)
-            elif isinstance(result, dict):
-                success = bool(result.get("successful", True))
-                err_payload = result.get("error") or result.get("data")
-        except Exception:
-            pass
-        if not success:
-            msg = _humanize_provider_error(err_payload or result, platform)
-            logger.error(f"Composio {platform} post failed (provider): {str(err_payload)[:500]}")
-            # Return 200 with success:false so reverse-proxy / edge layers don't rewrite the body
-            return {"success": False, "platform": platform, "error": msg}
-        # Mark history item as posted to this platform
-        if history_id:
-            await db.history.update_one(
-                {"id": history_id, "user_id": user_id},
-                {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
-            )
-        return {"success": True, "platform": platform, "with_image": bool(args.get("images") or image_b64 or image_url), "result": str(result)[:400]}
-    except HTTPException:
-        raise
-    except Exception as e:
-        clean = _humanize_provider_error(e, platform)
-        logger.error(f"Composio {platform} post failed: {e}")
-        # Return 200 with success:false (avoid 5xx so the edge proxy doesn't replace body with HTML)
-        return {"success": False, "platform": platform, "error": clean}
+            result = await asyncio.to_thread(_execute)
+            success = True
+            err_payload: Any = None
+            try:
+                if hasattr(result, "successful"):
+                    success = bool(result.successful)
+                    err_payload = getattr(result, "error", None) or getattr(result, "data", None)
+                elif isinstance(result, dict):
+                    success = bool(result.get("successful", True))
+                    err_payload = result.get("error") or result.get("data")
+            except Exception:
+                pass
+            if not success:
+                msg = _humanize_provider_error(err_payload or result, platform)
+                logger.error(f"Composio linkedin post failed (provider): {str(err_payload)[:500]}")
+                return {"success": False, "platform": platform, "error": msg}
+            if history_id:
+                await db.history.update_one(
+                    {"id": history_id, "user_id": user_id},
+                    {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
+                )
+            return {"success": True, "platform": platform, "with_image": bool(args.get("images") or image_b64), "result": str(result)[:400]}
+        except Exception as e:
+            logger.error(f"Composio linkedin post failed: {e}")
+            return {"success": False, "platform": platform, "error": _humanize_provider_error(e, platform)}
+
+    # Instagram & Facebook need a publicly fetchable HTTPS URL when an image is present.
+    if image_b64 and not image_url:
+        hosted = await _host_public_image(image_b64, image_mime, request)
+        if hosted:
+            image_url = hosted
+        elif platform == "instagram":
+            return {"success": False, "platform": platform, "error": "Couldn't host the image publicly. Please retry — Instagram needs a public image URL."}
+
+    if platform == "instagram":
+        return await _post_to_instagram(user_id, content, image_url or "", chosen_conn_id, history_id)
+    if platform == "facebook":
+        return await _post_to_facebook(user_id, content, image_url, chosen_conn_id, history_id)
+
+    return {"success": False, "platform": platform, "error": f"{platform} posting not supported"}
 
 
 @api_router.post("/social/{platform}/disconnect")
@@ -1447,6 +1699,10 @@ async def social_disconnect(platform: str, user_id: str = Depends(get_user_id)):
         unset_fields: Dict[str, str] = {}
         if platform == "linkedin":
             unset_fields = {"linkedin_connection_id": "", "linkedin_connected": "", "linkedin_author_urn": ""}
+        elif platform == "instagram":
+            unset_fields = {"instagram_user_ids": ""}
+        elif platform == "facebook":
+            unset_fields = {"facebook_page_ids": ""}
         await db.users.update_one(
             {"user_id": user_id},
             {"$unset": unset_fields, "$set": {"user_id": user_id, "updated_at": datetime.now(timezone.utc).isoformat()}},
@@ -1495,50 +1751,58 @@ async def _execute_social_post(user_id: str, platform: str, content: str, image_
                 args["images"] = [await _linkedin_upload_image(user_id, author_urn, image_b64, image_mime or "image/png")]
             except Exception as e:
                 logger.warning(f"Schedule image upload failed for linkedin: {e}")
-    elif platform in ("instagram", "facebook"):
-        # Host the image publicly so Instagram/Facebook can fetch it
+        slug = SOCIAL_POST_TOOLS[platform]["slug"]
+
+        def _exec():
+            client = _composio_client()
+            kwargs: Dict[str, Any] = {
+                "user_id": user_id, "slug": slug, "arguments": args,
+                "dangerously_skip_version_check": True,
+            }
+            if chosen_conn_id:
+                kwargs["connected_account_id"] = chosen_conn_id
+            return client.tools.execute(**kwargs)
+
+        try:
+            result = await asyncio.to_thread(_exec)
+            success = True
+            err_payload: Any = None
+            try:
+                if hasattr(result, "successful"):
+                    success = bool(result.successful)
+                    err_payload = getattr(result, "error", None) or getattr(result, "data", None)
+                elif isinstance(result, dict):
+                    success = bool(result.get("successful", True))
+                    err_payload = result.get("error") or result.get("data")
+            except Exception:
+                pass
+            if not success:
+                return {"platform": platform, "success": False, "error": _humanize_provider_error(err_payload or result, platform)}
+            if history_id:
+                await db.history.update_one(
+                    {"id": history_id, "user_id": user_id},
+                    {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
+                )
+            return {"platform": platform, "success": True}
+        except Exception as e:
+            return {"platform": platform, "success": False, "error": _humanize_provider_error(e, platform)}
+
+    # Instagram & Facebook — delegate to the dedicated helpers which handle the
+    # two-phase IG container/publish flow and FB Page selection.
+    if platform in ("instagram", "facebook"):
         image_url: Optional[str] = None
         if image_b64:
             image_url = await _host_public_image(image_b64, image_mime or "image/png", None)
-        if platform == "instagram" and not image_url:
-            return {"platform": platform, "success": False, "error": "Instagram requires an image — none was provided or hosting failed."}
-        args = _build_post_args(platform, content, image_url, None)
-    else:
-        return {"platform": platform, "success": False, "error": f"{platform} posting not yet supported"}
+        if platform == "instagram":
+            if not image_url:
+                return {"platform": platform, "success": False, "error": "Instagram requires an image — none was provided or hosting failed."}
+            r = await _post_to_instagram(user_id, content, image_url, chosen_conn_id, history_id)
+        else:
+            r = await _post_to_facebook(user_id, content, image_url, chosen_conn_id, history_id)
+        # Normalize shape: scheduler expects {platform, success, error?}
+        return {"platform": platform, "success": bool(r.get("success")), "error": r.get("error")}
 
-    def _exec():
-        client = _composio_client()
-        kwargs: Dict[str, Any] = {
-            "user_id": user_id, "slug": slug, "arguments": args,
-            "dangerously_skip_version_check": True,
-        }
-        if chosen_conn_id:
-            kwargs["connected_account_id"] = chosen_conn_id
-        return client.tools.execute(**kwargs)
-
-    try:
-        result = await asyncio.to_thread(_exec)
-        success = True
-        err_payload: Any = None
-        try:
-            if hasattr(result, "successful"):
-                success = bool(result.successful)
-                err_payload = getattr(result, "error", None) or getattr(result, "data", None)
-            elif isinstance(result, dict):
-                success = bool(result.get("successful", True))
-                err_payload = result.get("error") or result.get("data")
-        except Exception:
-            pass
-        if not success:
-            return {"platform": platform, "success": False, "error": str(err_payload or result)[:300]}
-        if history_id:
-            await db.history.update_one(
-                {"id": history_id, "user_id": user_id},
-                {"$addToSet": {"posted_to": {"platform": platform, "posted_at": datetime.now(timezone.utc).isoformat()}}},
-            )
-        return {"platform": platform, "success": True}
-    except Exception as e:
-        return {"platform": platform, "success": False, "error": str(e)[:300]}
+    return {"platform": platform, "success": False, "error": f"{platform} posting not supported"}
 
 
 async def _scheduler_loop():

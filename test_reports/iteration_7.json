@@ -1,0 +1,54 @@
+{
+  "summary": "Iteration 7 backend retest for Instagram + Facebook multi-phase Composio posting flow. Created /app/backend/tests/test_ig_fb_multiphase.py (20 tests) — ALL 20 PASS. Existing /app/backend/tests/test_instagram_image_hosting.py (22 tests) also re-run — ALL 22 PASS. Total 42/42 backend tests pass. Verified: (1) IG image post for unconnected user returns HTTP 200 + application/json + {success:false, platform:'instagram', error:\"Couldn't fetch your Instagram Business account ID...\"} — Composio INSTAGRAM_GET_USER_INFO fails first with ConnectedAccountNotFound, fallback slugs (INSTAGRAM_USER_INFO, INSTAGRAM_GET_PROFILE, INSTAGRAM_ME) also fail with Tool_ToolNotFound, and the user-facing error stays clean. (2) FB text-only post → 200 + {success:false, error:\"Couldn't find a managed Facebook Page on your account...\"}. (3) FB photo post: backend logs confirm page discovery is the failing step (FACEBOOK_LIST_MANAGED_PAGES → ConnectedAccountNotFound, fallback FACEBOOK_PAGES_LIST → ToolNotFound) — slug branching to FACEBOOK_CREATE_PHOTO_POST is in place at server.py:1526 but only exercises after page discovery succeeds (cannot live-test without a real connection; code branch verified by inspection). (4) LinkedIn unchanged — still 200 + clean message. (5) IG without image → HTTP 400 'instagram requires an image' (unchanged). (6) /api/public/social-image/{id} returns 200 future / 410 expired / 404 unknown. (7) /api/scheduled with platforms:['instagram','facebook'] + image_b64 → 200 accepted. (8) Cache sanity: after failed IG/FB discovery the user doc contains NO instagram_user_ids or facebook_page_ids — verified directly against MongoDB. (9) _humanize_provider_error unit-tested directly with a Python set repr (\"missing fields: {'creation_id', 'ig_user_id'}\") — the raw set repr does NOT leak; output is a human sentence. (10) No HTML (<html, <!doctype, <body, <head) leaks into any error body across all 3 platforms via both INTERNAL_URL and the public Cloudflare edge. All Composio calls are LIVE — no mocks.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/social/facebook/post", "issue": "When the user has no Composio connection at all the user-facing message says 'Couldn't find a managed Facebook Page on your account...' even though the actual root cause is ConnectedAccountNotFound. The message is still clean and actionable, but it would be slightly more accurate to surface 'no Facebook account connected' for the ConnectedAccountNotFound case. Same applies to IG. Non-blocking — both messages tell the user to (re)connect in Settings."},
+      {"endpoint": "_instagram_get_user_id / _facebook_get_page_id (server.py:944-1015)", "issue": "Fallback loop reassigns `res` on each alt slug attempt, so only the LAST attempt's error_raw survives. The backend log line therefore always reports Tool_ToolNotFound for the alt slug instead of the original ConnectedAccountNotFound. Non-blocking but makes debugging harder; consider preserving the first non-ToolNotFound error."},
+      {"endpoint": "/app/backend/server.py size", "issue": "server.py is now 1995 lines (+264 from iter 6). Re-iterating the earlier suggestion to split social/* and public_images/* into routers. Non-blocking."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_ig_fb_multiphase.py",
+    "/app/backend/tests/test_instagram_image_hosting.py",
+    "/app/test_reports/pytest/ig_fb_multiphase.xml",
+    "/app/test_reports/pytest/instagram_image_hosting.xml"
+  ],
+  "action_items": [
+    "[OPTIONAL/LOW] In _facebook_get_page_id / _instagram_get_user_id, when the FIRST slug returns ConnectedAccountNotFound, surface that to the user-facing message instead of the generic 'Couldn't find a managed Facebook Page' / 'Couldn't fetch your Instagram Business account ID' fallback. e.g. detect 'no connected account' in error_raw of the first attempt and short-circuit with the friendlier 'No facebook/instagram account connected. Please connect in Settings.' message.",
+    "[OPTIONAL/LOW] Preserve the first non-ToolNotFound error in the fallback slug loop so backend logs show the real reason (currently overwritten by the last alt slug's 404).",
+    "[OPTIONAL/LOW] Split server.py (1995 lines) — extract social/* and public_images/* into routers/."
+  ],
+  "critical_code_review_comments": [
+    "server.py:915-941 — _composio_call cleanly normalizes exceptions into {success, data, error_raw, raw}. Trap is broad (`except Exception`), which is the right call here.",
+    "server.py:944-977 — _instagram_get_user_id properly caches under `instagram_user_ids.{cache_key}` and only persists on success. Verified empirically: after a failed discovery the field is absent.",
+    "server.py:980-1015 — _facebook_get_page_id mirrors IG and extracts page id from {data:[...]}, {pages:[...]}, {items:[...]}, {result:[...]} shapes. Defensive enough for the FB Graph variants Composio surfaces.",
+    "server.py:1465-1511 — _post_to_instagram correctly implements the TWO-PHASE flow (INSTAGRAM_CREATE_MEDIA_CONTAINER → extract creation_id → INSTAGRAM_CREATE_POST). _extract_first is used to handle creation_id/container_id/id key variants.",
+    "server.py:1514-1542 — _post_to_facebook correctly switches between FACEBOOK_CREATE_PHOTO_POST (with image_url) and FACEBOOK_CREATE_POST (text-only). Argument key is `message` (not `text`) as required.",
+    "server.py:1434-1462 — _humanize_provider_error catches HTML/Cloudflare/Bad Gateway, ConnectedAccountNotFound, invalid_request, IG ig_user_id/creation_id/business, FB page_id/permission cues. Always strips HTML tags and caps at 280 chars. Verified by direct unit tests (4 cases).",
+    "server.py:1545-1667 — social_post route delegates IG/FB to the new helpers; LinkedIn branch unchanged. All exception paths return 200 + JSON envelope (no 5xx leak verified by tests).",
+    "server.py:1700-1710 — social_disconnect correctly unsets instagram_user_ids / facebook_page_ids on disconnect so re-connect rediscovers IDs. Good.",
+    "server.py:1717-1810 — _execute_social_post (scheduler) now delegates IG/FB to _post_to_instagram / _post_to_facebook, matching the live route. Scheduler will get the same clean errors."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_ig_fb_multiphase.py (new — 20 tests)",
+    "/app/test_reports/pytest/ig_fb_multiphase.xml (new)",
+    "/app/test_reports/pytest/instagram_image_hosting.xml (regenerated, 22/22 pass)",
+    "/app/test_reports/iteration_7.json (this file)"
+  ],
+  "success_rate": {
+    "backend": "42/42 (100%) — 20/20 new ig_fb_multiphase tests + 22/22 existing instagram_image_hosting regression tests. IG single-image, IG validation 400s, IG data-URI tolerance, FB text-only, FB photo, FB validation, LinkedIn regression, edge-no-rewrite for IG/FB-text/FB-photo/LinkedIn, public image 200/410/404, scheduled post accepted for [instagram,facebook], _humanize_provider_error 4 direct unit cases (set repr leak, no-connected-account, FB page permission, HTML body) — all green. Live Composio is hit; failures are expected (no test users have connections) but responses stay clean 200 + application/json.",
+    "frontend": "not tested (backend-only retest per request)"
+  },
+  "seed_data_creation": "Ephemeral docs: public_images (id prefixes TEST_MP_FUT_, TEST_MP_EXP_) and scheduled_posts (content TEST_scheduled_mp7). All deleted in finally blocks. Throwaway X-User-Id per test (be-tester-mp-<8hex>). Edge tests do create real public_images docs (TTL 2h, self-expiring).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 7 multi-phase IG/FB Composio flow is fully verified at the response-envelope level. Full happy-path posting (real IG Business + real FB Page connected via Composio) cannot be auto-tested without a live Composio connection — a human run is still required to confirm the actual creation_id round-trip with Instagram Graph and the page_id round-trip with Facebook Graph. Test file at /app/backend/tests/test_ig_fb_multiphase.py is the regression suite for this iteration. server.py is now 1995 lines — consider splitting before iter 8.",
+  "rca_of_issue": "No bug to RCA this iteration — this was a backend retest of a forward-progress refactor (E1 swapped the old flat Composio slug call for a two-phase INSTAGRAM_CREATE_MEDIA_CONTAINER → INSTAGRAM_CREATE_POST flow and added the matching FACEBOOK_CREATE_PHOTO_POST / FACEBOOK_CREATE_POST branching with FACEBOOK_LIST_MANAGED_PAGES page-discovery). Verification: (1) Endpoints return clean 200 + JSON for all 3 platforms even when Composio raises BadRequestError. (2) New helpers (_composio_call, _instagram_get_user_id, _facebook_get_page_id, _post_to_instagram, _post_to_facebook) are wired into both the live route AND the scheduler. (3) social_disconnect clears instagram_user_ids / facebook_page_ids cache fields. (4) _humanize_provider_error does NOT leak Python set reprs and gives human-friendly sentences for the new ig_user_id/creation_id/page_id/business keywords. (5) No HTML rewrite through Cloudflare edge. All claims in the change request are satisfied."
+}
