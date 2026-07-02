@@ -532,7 +532,7 @@ def _render_legal_html(md_filename: str, title: str) -> str:
     try:
         raw = (LEGAL_DOCS_DIR / md_filename).read_text(encoding="utf-8")
     except Exception:
-        raw = f"# {title}\n\nDocument not available. Please contact support@coolgeek.me."
+        raw = f"# {title}\n\nDocument not available. Please contact team@coolgeek.me."
     body = _md.markdown(raw, extensions=["extra", "sane_lists", "toc"])
     return LEGAL_HTML_WRAPPER.format(title=title, body=body)
 

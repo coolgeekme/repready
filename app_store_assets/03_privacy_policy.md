@@ -75,11 +75,11 @@ No data is sold or shared with advertisers.
 ## 4. Your Rights
 
 - **Access**: View all data you've saved inside the App (Settings, History/Library)
-- **Export**: Email support@coolgeek.me and we'll send a JSON export within 30 days
-- **Delete**: Tap Settings → Sign out, then email support@coolgeek.me to permanently delete your account and all associated data within 30 days
+- **Export**: Email team@coolgeek.me and we'll send a JSON export within 30 days
+- **Delete**: Tap Settings → Sign out, then email team@coolgeek.me to permanently delete your account and all associated data within 30 days
 - **Disconnect**: Remove any LinkedIn/Facebook/Instagram connection at any time from the company detail screen
 
-Residents of California (CCPA), the EU/UK (GDPR), and other jurisdictions have additional rights including access, correction, deletion, restriction, portability, and the right to lodge a complaint with a supervisory authority. Contact us at support@coolgeek.me to exercise these rights.
+Residents of California (CCPA), the EU/UK (GDPR), and other jurisdictions have additional rights including access, correction, deletion, restriction, portability, and the right to lodge a complaint with a supervisory authority. Contact us at team@coolgeek.me to exercise these rights.
 
 ---
 
@@ -122,8 +122,8 @@ We may update this Policy. Material changes will be communicated in-app or by em
 ## 10. Contact Us
 
 Questions, requests, or complaints:
-- Email: support@coolgeek.me
-- Mailing address: (Address available on request via support@coolgeek.me)
+- Email: team@coolgeek.me
+- Mailing address: (Address available on request via team@coolgeek.me)
 
 ---
 

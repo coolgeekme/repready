@@ -13,7 +13,7 @@ import { colors, fonts, radii, spacing } from "@/src/theme";
 
 const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "Founder/CEO"];
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
-const SUPPORT_EMAIL = "support@coolgeek.me";
+const SUPPORT_EMAIL = "team@coolgeek.me";
 
 export default function Settings() {
   const { user, signOutUser, deleteAccount } = useAuth();
@@ -385,7 +385,7 @@ export default function Settings() {
                           "For security, deleting an account requires a fresh sign-in. Sign out, sign back in, then try again.",
                         );
                       } else {
-                        Alert.alert("Couldn't delete account", msg.slice(0, 240) || "Please try again or email support@coolgeek.me.");
+                        Alert.alert("Couldn't delete account", msg.slice(0, 240) || "Please try again or email team@coolgeek.me.");
                       }
                     } finally {
                       setDeletingAccount(false);

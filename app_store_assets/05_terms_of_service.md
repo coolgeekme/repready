@@ -13,7 +13,7 @@ You must be at least 16 years old (or the age of digital consent in your jurisdi
 
 ## 2. Your Account
 
-You are responsible for keeping your account credentials secure and for all activity that happens under your account. Notify us at support@coolgeek.me if you suspect unauthorized use.
+You are responsible for keeping your account credentials secure and for all activity that happens under your account. Notify us at team@coolgeek.me if you suspect unauthorized use.
 
 ## 3. Acceptable Use
 
@@ -60,7 +60,7 @@ These Terms are governed by the laws of the State of California, USA, without re
 
 ## 12. Contact
 
-- Email: support@coolgeek.me
+- Email: team@coolgeek.me
 - App Store listing: SalesReady by Cool Geek LLC
 
 ---

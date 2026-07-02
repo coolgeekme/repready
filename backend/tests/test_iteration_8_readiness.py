@@ -100,7 +100,7 @@ class TestLegalPrivacy:
         body = r.text
         assert "Privacy Policy" in body
         assert "SalesReady" in body
-        assert "support@coolgeek.me" in body
+        assert "team@coolgeek.me" in body
 
     def test_no_bracketed_placeholders(self, api):
         r = requests.get(f"{BASE_URL}/api/legal/privacy", timeout=15)
