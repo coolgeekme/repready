@@ -118,6 +118,7 @@ export const api = {
   // Scheduled posts
   schedulePost: (body: any) => request<any>("/scheduled", { method: "POST", body: JSON.stringify(body) }),
   listScheduled: () => request<any>("/scheduled"),
+  deleteScheduled: (id: string) => request<any>(`/scheduled/${id}`, { method: "DELETE" }),
   cancelScheduled: (id: string) => request<any>(`/scheduled/${id}`, { method: "DELETE" }),
 
   // Company autofill
