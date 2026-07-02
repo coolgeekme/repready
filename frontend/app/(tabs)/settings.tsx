@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, TextInput, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from "react-native";
+import { View, Text, TextInput, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
+import * as WebBrowser from "expo-web-browser";
 import Constants from "expo-constants";
 import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/contexts/AuthContext";
@@ -12,9 +13,10 @@ import { colors, fonts, radii, spacing } from "@/src/theme";
 
 const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "Founder/CEO"];
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
+const SUPPORT_EMAIL = "support@coolgeek.me";
 
 export default function Settings() {
-  const { user, signOutUser } = useAuth();
+  const { user, signOutUser, deleteAccount } = useAuth();
   const [profile, setProfile] = useState<any>({});
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
@@ -23,6 +25,7 @@ export default function Settings() {
   const [newCompanyMode, setNewCompanyMode] = useState(false);
   const [newCompanyName, setNewCompanyName] = useState("");
   const [savingNewCompany, setSavingNewCompany] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   const loadCompanies = useCallback(async () => {
     try {
@@ -304,6 +307,104 @@ export default function Settings() {
           <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
 
+        {/* Legal & Support section */}
+        <View style={styles.sectionHeader}>
+          <Ionicons name="shield-outline" size={16} color={colors.primary} />
+          <Text style={styles.sectionHeaderText}>Legal &amp; support</Text>
+        </View>
+
+        <TouchableOpacity
+          testID="settings-privacy-policy"
+          style={styles.linkRow}
+          onPress={() => WebBrowser.openBrowserAsync(api.legalPrivacyUrl())}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="lock-closed-outline" size={18} color={colors.text} />
+          <Text style={styles.linkRowText}>Privacy Policy</Text>
+          <Ionicons name="open-outline" size={16} color={colors.textSubtle} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          testID="settings-terms"
+          style={styles.linkRow}
+          onPress={() => WebBrowser.openBrowserAsync(api.legalTermsUrl())}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="document-text-outline" size={18} color={colors.text} />
+          <Text style={styles.linkRowText}>Terms of Service</Text>
+          <Ionicons name="open-outline" size={16} color={colors.textSubtle} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          testID="settings-contact-support"
+          style={styles.linkRow}
+          onPress={async () => {
+            const url = `mailto:${SUPPORT_EMAIL}?subject=SalesReady%20Support`;
+            const supported = await Linking.canOpenURL(url);
+            if (supported) {
+              await Linking.openURL(url);
+            } else {
+              setToast(`Email us at ${SUPPORT_EMAIL}`);
+              setTimeout(() => setToast(null), 3500);
+            }
+          }}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="mail-outline" size={18} color={colors.text} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkRowText}>Contact support</Text>
+            <Text style={styles.linkRowSub}>{SUPPORT_EMAIL}</Text>
+          </View>
+          <Ionicons name="open-outline" size={16} color={colors.textSubtle} />
+        </TouchableOpacity>
+
+        {/* Delete account — destructive, always last */}
+        <TouchableOpacity
+          testID="settings-delete-account"
+          style={styles.deleteRow}
+          disabled={deletingAccount}
+          onPress={() => {
+            Alert.alert(
+              "Delete your account?",
+              "This permanently deletes your account, all companies, saved history, scheduled posts, and connected social accounts. This cannot be undone.",
+              [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Delete",
+                  style: "destructive",
+                  onPress: async () => {
+                    try {
+                      setDeletingAccount(true);
+                      await deleteAccount();
+                      // Firebase auth state change will route back to sign-in automatically.
+                    } catch (e: any) {
+                      const msg = String(e?.message || e || "");
+                      if (msg.includes("auth/requires-recent-login")) {
+                        Alert.alert(
+                          "Please sign in again",
+                          "For security, deleting an account requires a fresh sign-in. Sign out, sign back in, then try again.",
+                        );
+                      } else {
+                        Alert.alert("Couldn't delete account", msg.slice(0, 240) || "Please try again or email support@coolgeek.me.");
+                      }
+                    } finally {
+                      setDeletingAccount(false);
+                    }
+                  },
+                },
+              ],
+            );
+          }}
+          activeOpacity={0.8}
+        >
+          {deletingAccount ? (
+            <ActivityIndicator size="small" color={colors.error} />
+          ) : (
+            <Ionicons name="trash-outline" size={18} color={colors.error} />
+          )}
+          <Text style={styles.deleteRowText}>{deletingAccount ? "Deleting…" : "Delete my account"}</Text>
+        </TouchableOpacity>
+
         {/* Admin shortcut (only visible to admins) */}
         {profile.is_admin && (
           <TouchableOpacity
@@ -429,6 +530,13 @@ const styles = StyleSheet.create({
 
   signOut: { flexDirection: "row", alignItems: "center", gap: 8, justifyContent: "center", marginTop: spacing.xl, padding: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm },
   signOutText: { color: colors.error, fontWeight: "700" },
+
+  linkRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 14, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, backgroundColor: "#fff", marginTop: 8 },
+  linkRowText: { flex: 1, color: colors.text, fontWeight: "600", fontSize: 14 },
+  linkRowSub: { color: colors.textSubtle, fontSize: 11, marginTop: 2 },
+
+  deleteRow: { flexDirection: "row", alignItems: "center", gap: 10, justifyContent: "center", marginTop: 10, padding: 14, borderWidth: 1, borderColor: colors.error, borderRadius: radii.sm, backgroundColor: "#FEF2F2" },
+  deleteRowText: { color: colors.error, fontWeight: "800", fontSize: 14 },
 
   adminLink: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10, padding: 14, borderRadius: radii.sm, borderWidth: 1, borderColor: "#7c3aed", backgroundColor: "#F3E8FF" },
   adminLinkTitle: { color: "#7c3aed", fontWeight: "800", fontSize: 14 },

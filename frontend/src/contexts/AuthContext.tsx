@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import {
   createUserWithEmailAndPassword,
+  deleteUser as fbDeleteUser,
   onAuthStateChanged,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
@@ -9,6 +10,7 @@ import {
   User,
 } from "firebase/auth";
 import { auth } from "@/src/lib/firebase";
+import { api } from "@/src/lib/api";
 
 type AuthContextValue = {
   user: User | null;
@@ -17,6 +19,7 @@ type AuthContextValue = {
   signIn: (email: string, password: string) => Promise<User>;
   resetPassword: (email: string) => Promise<void>;
   signOutUser: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -54,8 +57,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await signOut(auth);
   };
 
+  const deleteAccount = async () => {
+    // 1) Wipe server-side data first (uses X-User-Id from the current Firebase token).
+    await api.deleteMyAccount();
+    // 2) Then delete the Firebase Auth user itself. Firebase may throw
+    //    `auth/requires-recent-login` if the ID token is too old; caller should
+    //    re-authenticate and retry in that case.
+    if (auth.currentUser) {
+      await fbDeleteUser(auth.currentUser);
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, initializing, signUp, signIn, resetPassword, signOutUser }}>
+    <AuthContext.Provider value={{ user, initializing, signUp, signIn, resetPassword, signOutUser, deleteAccount }}>
       {children}
     </AuthContext.Provider>
   );

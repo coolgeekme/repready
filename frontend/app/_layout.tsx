@@ -8,6 +8,7 @@ import { StatusBar } from "expo-status-bar";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/contexts/AuthContext";
+import { ErrorBoundary } from "@/src/components/ErrorBoundary";
 
 LogBox.ignoreAllLogs(true);
 
@@ -45,13 +46,15 @@ export default function RootLayout() {
   if (!loaded && !error) return null;
 
   return (
-    <SafeAreaProvider>
-      <KeyboardProvider>
-        <AuthProvider>
-          <StatusBar style="dark" />
-          <NavigationGate />
-        </AuthProvider>
-      </KeyboardProvider>
-    </SafeAreaProvider>
+    <ErrorBoundary>
+      <SafeAreaProvider>
+        <KeyboardProvider>
+          <AuthProvider>
+            <StatusBar style="dark" />
+            <NavigationGate />
+          </AuthProvider>
+        </KeyboardProvider>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }

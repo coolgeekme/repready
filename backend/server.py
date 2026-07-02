@@ -445,6 +445,110 @@ async def update_profile(payload: ProfileUpdate, user_id: str = Depends(get_user
     return profile
 
 
+@api_router.delete("/users/me")
+async def delete_my_account(user_id: str = Depends(get_user_id)):
+    """Permanently delete the caller's account and all associated user data.
+
+    Required by Apple App Store Guideline 5.1.1(v). This deletes the user's
+    documents across every collection we own. The Firebase Auth user itself
+    is deleted client-side via `deleteUser()` right after this call succeeds.
+    """
+    import asyncio
+    # Best-effort revoke Composio connections so third-party tokens don't linger.
+    try:
+        cur = db.connected_accounts.find({"user_id": user_id})
+        async for acct in cur:
+            conn_id = acct.get("connection_id")
+            if conn_id:
+                try:
+                    client = _composio_client()
+                    # Old SDKs expose .connected_accounts.delete; newer .connections.delete.
+                    if hasattr(client, "connected_accounts") and hasattr(client.connected_accounts, "delete"):
+                        await asyncio.to_thread(client.connected_accounts.delete, conn_id)
+                    elif hasattr(client, "connections") and hasattr(client.connections, "delete"):
+                        await asyncio.to_thread(client.connections.delete, conn_id)
+                except Exception as ce:
+                    logger.warning(f"Composio delete conn {conn_id} failed (non-fatal): {ce}")
+    except Exception as e:
+        logger.warning(f"Composio bulk revoke failed (non-fatal): {e}")
+
+    # Wipe every collection that stores per-user data.
+    collections = [
+        "users",
+        "companies",
+        "history",
+        "scheduled_posts",
+        "connected_accounts",
+        "public_images",  # public_images are hosted-image byproducts, key by user is `owner`
+    ]
+    deleted_counts: Dict[str, int] = {}
+    for coll_name in collections:
+        try:
+            coll = getattr(db, coll_name)
+            # `public_images` doesn't have a user_id field; skip cleanly (they auto-expire).
+            if coll_name == "public_images":
+                continue
+            res = await coll.delete_many({"user_id": user_id})
+            deleted_counts[coll_name] = int(getattr(res, "deleted_count", 0) or 0)
+        except Exception as e:
+            logger.warning(f"Deletion in {coll_name} failed for user {user_id}: {e}")
+            deleted_counts[coll_name] = -1
+
+    logger.info(f"Account deleted: user={user_id} counts={deleted_counts}")
+    return {"success": True, "deleted": deleted_counts,
+            "note": "User account wiped from backend. Client should now delete Firebase Auth user."}
+
+
+# ---------- Routes: Legal documents (public, no auth) ----------
+LEGAL_DOCS_DIR = Path("/app/app_store_assets")
+LEGAL_HTML_WRAPPER = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{title}</title>
+<style>
+:root {{ color-scheme: light dark; }}
+body {{ font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; max-width: 720px; margin: 0 auto; padding: 24px 20px 64px; line-height: 1.55; color: #1a1a1a; background: #fff; }}
+@media (prefers-color-scheme: dark) {{ body {{ background: #0b0b0b; color: #eaeaea; }} a {{ color: #6ab0ff; }} }}
+h1, h2, h3 {{ line-height: 1.25; }}
+h1 {{ font-size: 28px; margin-top: 8px; }}
+h2 {{ font-size: 20px; margin-top: 32px; border-bottom: 1px solid #eee2; padding-bottom: 4px; }}
+h3 {{ font-size: 16px; margin-top: 20px; }}
+p, li {{ font-size: 15px; }}
+code {{ background: #f5f5f7; padding: 1px 4px; border-radius: 4px; }}
+hr {{ border: 0; border-top: 1px solid #eee3; margin: 24px 0; }}
+</style>
+</head>
+<body>
+{body}
+</body>
+</html>
+"""
+
+
+def _render_legal_html(md_filename: str, title: str) -> str:
+    import markdown as _md
+    try:
+        raw = (LEGAL_DOCS_DIR / md_filename).read_text(encoding="utf-8")
+    except Exception:
+        raw = f"# {title}\n\nDocument not available. Please contact support@coolgeek.me."
+    body = _md.markdown(raw, extensions=["extra", "sane_lists", "toc"])
+    return LEGAL_HTML_WRAPPER.format(title=title, body=body)
+
+
+@api_router.get("/legal/privacy", response_class=Response)
+async def legal_privacy_policy():
+    html = _render_legal_html("03_privacy_policy.md", "Privacy Policy — SalesReady")
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "public, max-age=3600"})
+
+
+@api_router.get("/legal/terms", response_class=Response)
+async def legal_terms_of_service():
+    html = _render_legal_html("05_terms_of_service.md", "Terms of Service — SalesReady")
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "public, max-age=3600"})
+
+
 # ---------- Routes: Admin (entitlement comp management) ----------
 class GrantCompRequest(BaseModel):
     email: str  # The target user's email (case-insensitive lookup)

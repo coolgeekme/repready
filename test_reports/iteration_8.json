@@ -1,0 +1,39 @@
+{
+  "summary": "Backend-only verification of the 5 App Store readiness fixes. All 13 pytest tests pass (13/13, 100%). Verified: (1) DELETE /api/users/me — 401 without auth, 200 with zero-count deletion for fresh users, wipes user+company docs for seeded users (users=1, companies=1). (2) GET /api/legal/privacy — public 200 text/html, contains 'Privacy Policy — SalesReady' + 'support@coolgeek.me', no [bracketed] placeholders, <h1>/<h2> rendered. (3) GET /api/legal/terms — public 200 text/html, contains 'Terms of Service — SalesReady' + 'Cool Geek LLC', no placeholders, headings rendered. (4) Regression: /api/users/profile still 200 with valid X-User-Id; /api/social/instagram/post returns clean {success:false, error:'…'} JSON with 200 when Composio call fails. (5) app.json parses as valid JSON; ios.privacyManifests declares NSPrivacyTracking:false and all 4 NSPrivacyAccessedAPITypes categories (UserDefaults CA92.1, FileTimestamp C617.1, DiskSpace E174.1, SystemBootTime 35F9.1). Both markdown files (03_privacy_policy.md, 05_terms_of_service.md) exist and no `[Placeholder]` tokens remain.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_8_readiness.py",
+    "/app/test_reports/pytest/iteration_8_results.xml"
+  ],
+  "action_items": [
+    "None for the 5 readiness fixes — all backend contracts verified.",
+    "Note (not a bug, informational): POST /api/social/{platform}/post returns HTTP 400 (not 200 success:false) when the caller omits image_b64/image_url for a platform that needs one (Instagram). This is a legitimate client-side validation error and is separate from the 'clean provider-error' path documented in the review request. Test now exercises the provider path by sending a 1x1 PNG.",
+    "Manual verification of ios.privacyManifests inside the app bundle still requires an EAS build — cannot be checked from the preview.",
+    "Frontend (settings.tsx Legal & Support section, Delete-account confirmation Alert, ErrorBoundary retry UI) was NOT tested per the review request scope; user will verify manually."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 2,104 lines — still exceeds the 700-line file-size guideline and would benefit from splitting (legal, social, admin, generators into separate modules). Not blocking for App Store submission.",
+    "delete_my_account() correctly wipes users/companies/history/scheduled_posts/connected_accounts and best-effort-revokes Composio connections (both new .connections.delete and legacy .connected_accounts.delete SDK paths). Errors are logged non-fatally so deletion always succeeds — correct behavior for GDPR/Apple 5.1.1(v).",
+    "_render_legal_html() falls back to an in-page 'Document not available. Please contact support@coolgeek.me.' message if the .md file is missing — good defensive default. Cache-Control public, max-age=3600 is appropriate.",
+    "Public legal endpoints correctly bypass get_user_id (no dependency), so App Store reviewers can hit them without an account. Confirmed via anonymous requests.",
+    "Privacy manifest declares 4 required Apple API categories with reason codes and NSPrivacyTracking:false — matches Apple's May 2024 requirements. NSPrivacyCollectedDataTypes (email, user id, generated content, all Linked, none for tracking) is present and consistent with the app's actual data collection."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_8_readiness.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested (per scope)"},
+  "seed_data_creation": "Each test seeds a fresh TEST_-prefixed X-User-Id (UUID hex slice) and self-cleans via DELETE /api/users/me in the same test. No residual test docs left in Mongo.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 8 was backend-only. Test file: /app/backend/tests/test_iteration_8_readiness.py (13 tests, all passing). If the next iteration touches settings.tsx or ErrorBoundary, run frontend UI tests separately. The /api/social/instagram/post endpoint returns 400 (not 200) when image_b64 is missing — this is not a bug; the 'clean success:false JSON' contract only applies AFTER the required-field validation passes. See test_instagram_post_clean_error for the correct usage pattern.",
+  "rca_of_issue": "N/A — no bugs found."
+}

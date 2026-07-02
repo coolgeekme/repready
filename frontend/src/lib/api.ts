@@ -29,6 +29,11 @@ export const api = {
   getProfile: () => request<any>("/users/profile"),
   updateProfile: (data: any) =>
     request<any>("/users/profile", { method: "PUT", body: JSON.stringify(data) }),
+  deleteMyAccount: () => request<any>("/users/me", { method: "DELETE" }),
+
+  // Legal document URLs (used by Settings to open in in-app browser)
+  legalPrivacyUrl: () => `${BASE}/api/legal/privacy`,
+  legalTermsUrl: () => `${BASE}/api/legal/terms`,
 
   // Daily prompt
   dailyPrompt: () => request<any>("/daily-prompt"),

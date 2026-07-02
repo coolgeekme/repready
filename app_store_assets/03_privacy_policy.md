@@ -3,13 +3,13 @@
 **Effective Date:** June 25, 2026
 **Last Updated:** June 25, 2026
 
-_Replace placeholders in brackets before publishing._
+
 
 ---
 
 ## Quick Summary
 
-SalesReady ("the App," "we," "us") is operated by [Cool Geek LLC / Reggie Cool Geek] ("the Company"). We store the minimum data needed to run the App. We do **not** sell your data, do **not** use it to train AI models, and do **not** track you across other apps.
+SalesReady ("the App," "we," "us") is operated by Cool Geek LLC ("the Company"). We store the minimum data needed to run the App. We do **not** sell your data, do **not** use it to train AI models, and do **not** track you across other apps.
 
 ---
 
@@ -75,11 +75,11 @@ No data is sold or shared with advertisers.
 ## 4. Your Rights
 
 - **Access**: View all data you've saved inside the App (Settings, History/Library)
-- **Export**: Email [your-support-email] and we'll send a JSON export within 30 days
-- **Delete**: Tap Settings → Sign out, then email [your-support-email] to permanently delete your account and all associated data within 30 days
+- **Export**: Email support@coolgeek.me and we'll send a JSON export within 30 days
+- **Delete**: Tap Settings → Sign out, then email support@coolgeek.me to permanently delete your account and all associated data within 30 days
 - **Disconnect**: Remove any LinkedIn/Facebook/Instagram connection at any time from the company detail screen
 
-Residents of California (CCPA), the EU/UK (GDPR), and other jurisdictions have additional rights including access, correction, deletion, restriction, portability, and the right to lodge a complaint with a supervisory authority. Contact us at [your-support-email] to exercise these rights.
+Residents of California (CCPA), the EU/UK (GDPR), and other jurisdictions have additional rights including access, correction, deletion, restriction, portability, and the right to lodge a complaint with a supervisory authority. Contact us at support@coolgeek.me to exercise these rights.
 
 ---
 
@@ -122,9 +122,8 @@ We may update this Policy. Material changes will be communicated in-app or by em
 ## 10. Contact Us
 
 Questions, requests, or complaints:
-- Email: [your-support-email]
-- Mailing address: [Cool Geek LLC, your street, city, state, ZIP, country]
+- Email: support@coolgeek.me
+- Mailing address: (Address available on request via support@coolgeek.me)
 
 ---
 
-_This document is a starter template based on common SaaS privacy disclosures. For specific legal advice, consult an attorney. Tools like [Termly](https://termly.io) or [iubenda](https://www.iubenda.com) can generate a fully compliant policy customized to your business._
