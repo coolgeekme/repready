@@ -140,6 +140,9 @@ class ScheduledPostIn(BaseModel):
     image_b64: Optional[str] = None
     image_mime: Optional[str] = None
     history_id: Optional[str] = None
+    # Per-platform account picker override — mirrors social_post payload:
+    #   {"linkedin": "<connection_id>", "facebook": "<page_id>", "instagram": "<connection_id>"}
+    selected_accounts: Optional[Dict[str, str]] = None
 
 
 class GenerateRequest(BaseModel):
@@ -783,8 +786,37 @@ async def list_history(user_id: str = Depends(get_user_id), saved_only: bool = F
     query: Dict[str, Any] = {"user_id": user_id}
     if saved_only:
         query["saved"] = True
-    items = await db.history.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+    # Exclude heavy `images` payload from the list; use GET /history/{id} to fetch full entry.
+    items = await db.history.find(query, {"_id": 0, "images": 0}).sort("created_at", -1).to_list(100)
     return {"items": items}
+
+
+@api_router.get("/history/{item_id}")
+async def get_history_item(item_id: str, user_id: str = Depends(get_user_id)):
+    doc = await db.history.find_one({"id": item_id, "user_id": user_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    return doc
+
+
+@api_router.patch("/history/{item_id}")
+async def patch_history_item(item_id: str, payload: Dict[str, Any], user_id: str = Depends(get_user_id)):
+    """Partial update of a history entry. Whitelisted fields only.
+
+    Currently used for:
+      - `selected_accounts`: {linkedin: connection_id, facebook: page_id, instagram: connection_id}
+        (persists the user's per-post account override so we default to it next time)
+    """
+    allowed = {"selected_accounts", "saved", "title"}
+    update = {k: v for k, v in (payload or {}).items() if k in allowed}
+    if not update:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.history.update_one({"id": item_id, "user_id": user_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    doc = await db.history.find_one({"id": item_id, "user_id": user_id}, {"_id": 0})
+    return doc
 
 
 @api_router.post("/history/{item_id}/save")
@@ -918,6 +950,8 @@ class ImageRequest(BaseModel):
     body: Optional[str] = None
     prompt: Optional[str] = None  # explicit override
     style: Optional[str] = None  # e.g., "minimal flat illustration"
+    history_id: Optional[str] = None  # if provided, persist the image onto the history doc
+    variant_index: Optional[int] = None  # which variation this image belongs to (0-based)
 
 
 @api_router.post("/generate/post-image")
@@ -954,10 +988,33 @@ async def generate_post_image(payload: ImageRequest, user_id: str = Depends(get_
         raise HTTPException(status_code=502, detail="No image returned")
 
     img = images[0]
+    mime = img.get("mime_type", "image/png")
+    b64 = img.get("data")
+
+    # Persist onto the history entry so the image survives navigation / re-open.
+    if payload.history_id and payload.variant_index is not None and b64:
+        try:
+            await db.history.update_one(
+                {"id": payload.history_id, "user_id": user_id},
+                {"$set": {
+                    f"images.{payload.variant_index}": {
+                        "data": b64,
+                        "mime": mime,
+                        "prompt": image_prompt,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                }},
+            )
+        except Exception as e:
+            # Non-fatal — client still gets the image even if persistence fails.
+            logger.warning(f"Failed to attach image to history {payload.history_id}: {e}")
+
     return {
-        "mime_type": img.get("mime_type", "image/png"),
-        "data": img.get("data"),  # base64 string
+        "mime_type": mime,
+        "data": b64,  # base64 string
         "prompt": image_prompt,
+        "history_id": payload.history_id,
+        "variant_index": payload.variant_index,
     }
 
 
@@ -1416,6 +1473,7 @@ async def schedule_post(payload: ScheduledPostIn, user_id: str = Depends(get_use
         "image_b64": payload.image_b64,
         "image_mime": payload.image_mime,
         "history_id": payload.history_id,
+        "selected_accounts": payload.selected_accounts or {},
         "scheduled_for": sched_dt.isoformat(),
         "status": "scheduled",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1612,24 +1670,28 @@ async def _post_to_instagram(user_id: str, caption: str, image_url: str, connect
     return {"success": True, "platform": "instagram", "with_image": True, "result": str(publish["data"])[:400]}
 
 
-async def _post_to_facebook(user_id: str, message: str, image_url: Optional[str], connected_account_id: Optional[str], history_id: Optional[str]) -> Dict[str, Any]:
+async def _post_to_facebook(user_id: str, message: str, image_url: Optional[str], connected_account_id: Optional[str], history_id: Optional[str], page_id_override: Optional[str] = None) -> Dict[str, Any]:
     """Post text or photo to a connected Facebook Page.
 
-    Picks the user's first managed page (cached on the user doc). For posts that include
-    an image we use FACEBOOK_CREATE_PHOTO_POST; text-only posts go through FACEBOOK_CREATE_POST.
+    If `page_id_override` is provided (from the user's account-picker choice), use that
+    Page directly and skip the cached-page lookup. Otherwise fall back to the first
+    managed Page (cached on the user doc).
     """
-    page = await _facebook_get_page_id(user_id, connected_account_id)
-    page_id = page.get("id")
-    if not page_id:
-        raw = page.get("error") or ""
-        low = str(raw).lower()
-        if "connectedaccountnotfound" in low or "no connected account" in low:
-            msg = "No Facebook account connected. Please connect Facebook in Settings."
-        elif page.get("error") == "no_managed_page":
-            msg = "We couldn't find any Facebook Page you manage. Posting requires admin access to a Page (not a personal profile)."
-        else:
-            msg = "Couldn't find a managed Facebook Page on your account. Make sure you're an admin of a Page and reconnect Facebook."
-        return {"success": False, "platform": "facebook", "error": msg}
+    if page_id_override:
+        page_id = page_id_override
+    else:
+        page = await _facebook_get_page_id(user_id, connected_account_id)
+        page_id = page.get("id")
+        if not page_id:
+            raw = page.get("error") or ""
+            low = str(raw).lower()
+            if "connectedaccountnotfound" in low or "no connected account" in low:
+                msg = "No Facebook account connected. Please connect Facebook in Settings."
+            elif page.get("error") == "no_managed_page":
+                msg = "We couldn't find any Facebook Page you manage. Posting requires admin access to a Page (not a personal profile)."
+            else:
+                msg = "Couldn't find a managed Facebook Page on your account. Make sure you're an admin of a Page and reconnect Facebook."
+            return {"success": False, "platform": "facebook", "error": msg}
 
     if image_url:
         slug = "FACEBOOK_CREATE_PHOTO_POST"
@@ -1688,15 +1750,18 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
     if tool["needs_image"] and not image_url and not image_b64:
         raise HTTPException(status_code=400, detail=f"{platform} requires an image")
 
-    # Pick the connected account for the active company if set (multi-account support)
-    chosen_conn_id: Optional[str] = None
-    try:
-        active_company = await _get_active_company(user_id)
-        if active_company:
-            linked = active_company.get("linked_accounts") or {}
-            chosen_conn_id = linked.get(platform)
-    except Exception:
-        pass
+    # Pick the connected account. Explicit override wins; otherwise fall back to
+    # the active company's linked account. This drives the "Post as" picker UX (Option C).
+    chosen_conn_id: Optional[str] = (payload.get("connection_id") or "").strip() or None
+    fb_page_override: Optional[str] = (payload.get("page_id") or "").strip() or None
+    if not chosen_conn_id:
+        try:
+            active_company = await _get_active_company(user_id)
+            if active_company:
+                linked = active_company.get("linked_accounts") or {}
+                chosen_conn_id = linked.get(platform)
+        except Exception:
+            pass
 
     # LinkedIn-specific: build args with optional image upload
     if platform == "linkedin":
@@ -1771,7 +1836,7 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
     if platform == "instagram":
         return await _post_to_instagram(user_id, content, image_url or "", chosen_conn_id, history_id)
     if platform == "facebook":
-        return await _post_to_facebook(user_id, content, image_url, chosen_conn_id, history_id)
+        return await _post_to_facebook(user_id, content, image_url, chosen_conn_id, history_id, page_id_override=fb_page_override)
 
     return {"success": False, "platform": platform, "error": f"{platform} posting not supported"}
 
@@ -1823,8 +1888,21 @@ async def social_disconnect(platform: str, user_id: str = Depends(get_user_id)):
         raise HTTPException(status_code=502, detail=f"Composio error: {e}")
 
 
-async def _execute_social_post(user_id: str, platform: str, content: str, image_b64: Optional[str], image_mime: Optional[str], history_id: Optional[str]) -> Dict[str, Any]:
-    """Internal helper that the scheduler & post endpoint both call."""
+async def _execute_social_post(
+    user_id: str,
+    platform: str,
+    content: str,
+    image_b64: Optional[str],
+    image_mime: Optional[str],
+    history_id: Optional[str],
+    selected_accounts: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Internal helper that the scheduler & post endpoint both call.
+
+    `selected_accounts` is a user-picker override map:
+      {"linkedin": "<connection_id>", "facebook": "<page_id>", "instagram": "<connection_id>"}
+    If present for this platform it wins over the active-company default.
+    """
     import asyncio
     if platform not in SOCIAL_POST_TOOLS:
         return {"platform": platform, "success": False, "error": "Unknown platform"}
@@ -1840,11 +1918,22 @@ async def _execute_social_post(user_id: str, platform: str, content: str, image_
         except Exception:
             pass
 
+    # Resolve which account to use for this platform.
+    override_val = (selected_accounts or {}).get(platform)
     chosen_conn_id: Optional[str] = None
-    active_company = await _get_active_company(user_id)
-    if active_company:
-        linked = active_company.get("linked_accounts") or {}
-        chosen_conn_id = linked.get(platform)
+    fb_page_override: Optional[str] = None
+    if platform == "facebook":
+        # For FB the picker override is a Page ID (one FB connection exposes many Pages).
+        fb_page_override = override_val or None
+    else:
+        # LinkedIn / Instagram: override is a Composio connection ID.
+        chosen_conn_id = override_val or None
+
+    if not chosen_conn_id and platform != "facebook":
+        active_company = await _get_active_company(user_id)
+        if active_company:
+            linked = active_company.get("linked_accounts") or {}
+            chosen_conn_id = linked.get(platform)
 
     slug = SOCIAL_POST_TOOLS[platform]["slug"]
     args: Dict[str, Any] = {}
@@ -1907,7 +1996,7 @@ async def _execute_social_post(user_id: str, platform: str, content: str, image_
                 return {"platform": platform, "success": False, "error": "Instagram requires an image — none was provided or hosting failed."}
             r = await _post_to_instagram(user_id, content, image_url, chosen_conn_id, history_id)
         else:
-            r = await _post_to_facebook(user_id, content, image_url, chosen_conn_id, history_id)
+            r = await _post_to_facebook(user_id, content, image_url, chosen_conn_id, history_id, page_id_override=fb_page_override)
         # Normalize shape: scheduler expects {platform, success, error?}
         return {"platform": platform, "success": bool(r.get("success")), "error": r.get("error")}
 
@@ -1929,6 +2018,7 @@ async def _scheduler_loop():
                     r = await _execute_social_post(
                         doc["user_id"], platform, doc.get("content", ""),
                         doc.get("image_b64"), doc.get("image_mime"), doc.get("history_id"),
+                        selected_accounts=doc.get("selected_accounts") or {},
                     )
                     results.append(r)
                 final_status = "posted" if all(r["success"] for r in results) else "failed"
@@ -1939,6 +2029,112 @@ async def _scheduler_loop():
         except Exception as e:
             logger.error(f"Scheduler loop error: {e}")
         await asyncio.sleep(60)
+
+
+@api_router.get("/social/all-accounts")
+async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
+    """Unified account list for the account picker UI.
+
+    Returns:
+    - `linkedin`, `instagram`: one entry per connected Composio account
+    - `facebook_pages`: expanded — one entry per Page the user administers
+      (one Composio FB connection can expose many Pages)
+    """
+    import asyncio
+    out: Dict[str, List[Dict[str, Any]]] = {"linkedin": [], "facebook_pages": [], "instagram": []}
+
+    for platform in ("linkedin", "instagram", "facebook"):
+        auth_config_id = SOCIAL_AUTH_CONFIGS.get(platform, "")
+        if not auth_config_id:
+            continue
+
+        def _list(p=platform, aid=auth_config_id):
+            client = _composio_client()
+            return client.connected_accounts.list(user_ids=[user_id], auth_config_ids=[aid])
+
+        try:
+            result = await asyncio.to_thread(_list)
+        except Exception as e:
+            logger.warning(f"list connections for {platform} failed: {e}")
+            continue
+        items = getattr(result, "items", None) or list(result or [])
+        for it in items:
+            conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+            status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
+            if not conn_id or status != "ACTIVE":
+                continue
+
+            if platform == "linkedin":
+                display_name = None
+                try:
+                    info = await _composio_call(user_id, "LINKEDIN_GET_MY_INFO", {}, connected_account_id=conn_id)
+                    if info["success"] and isinstance(info["data"], dict):
+                        d = info["data"]
+                        display_name = d.get("name") or d.get("given_name") or d.get("localizedFirstName")
+                except Exception:
+                    pass
+                out["linkedin"].append({
+                    "id": conn_id,
+                    "connection_id": conn_id,
+                    "display_name": display_name or f"LinkedIn account …{conn_id[-6:]}",
+                    "kind": "linkedin",
+                })
+
+            elif platform == "instagram":
+                display_name = None
+                ig_user_id = None
+                try:
+                    info = await _composio_call(user_id, "INSTAGRAM_GET_USER_INFO", {}, connected_account_id=conn_id)
+                    if info["success"] and isinstance(info["data"], dict):
+                        d = info["data"]
+                        display_name = d.get("username") or d.get("name")
+                        ig_user_id = _extract_first(d, ["ig_user_id", "instagram_business_account_id", "instagram_id", "user_id", "id"])
+                except Exception:
+                    pass
+                out["instagram"].append({
+                    "id": conn_id,
+                    "connection_id": conn_id,
+                    "display_name": (f"@{display_name}" if display_name else f"Instagram account …{conn_id[-6:]}"),
+                    "ig_user_id": str(ig_user_id) if ig_user_id else None,
+                    "kind": "instagram",
+                })
+
+            elif platform == "facebook":
+                # Expand into pages
+                try:
+                    pages_res = await _composio_call(user_id, "FACEBOOK_LIST_MANAGED_PAGES", {}, connected_account_id=conn_id)
+                    if not pages_res["success"]:
+                        continue
+                    data = pages_res["data"]
+                    page_items: List[Dict[str, Any]] = []
+                    if isinstance(data, dict):
+                        for key in ("data", "pages", "items", "result"):
+                            v = data.get(key)
+                            if isinstance(v, list):
+                                page_items = v
+                                break
+                        if not page_items and (data.get("id") or data.get("page_id")):
+                            page_items = [data]
+                    elif isinstance(data, list):
+                        page_items = data
+                    for pg in page_items:
+                        if not isinstance(pg, dict):
+                            continue
+                        pid = pg.get("id") or pg.get("page_id")
+                        pname = pg.get("name") or pg.get("page_name")
+                        if not pid:
+                            continue
+                        out["facebook_pages"].append({
+                            "id": str(pid),
+                            "page_id": str(pid),
+                            "connection_id": conn_id,
+                            "display_name": pname or f"Facebook Page {str(pid)[-6:]}",
+                            "kind": "facebook_page",
+                        })
+                except Exception as e:
+                    logger.warning(f"FB page expand failed: {e}")
+
+    return out
 
 
 @api_router.get("/social/{platform}/accounts")

@@ -8,6 +8,7 @@ import * as Clipboard from "expo-clipboard";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radii, spacing } from "@/src/theme";
 import SchedulerModal from "@/src/components/SchedulerModal";
+import AccountPicker, { AccountSummary, AccountsMap, SelectedAccounts } from "@/src/components/AccountPicker";
 
 type GenType = "cold-email" | "objection" | "call-script" | "company-intel" | "re-engagement" | "linkedin-post";
 
@@ -42,6 +43,13 @@ export default function GenerateScreen() {
   const [schedulerIdx, setSchedulerIdx] = useState<number | null>(null);
   const [scheduling, setScheduling] = useState(false);
   const [scheduledIdx, setScheduledIdx] = useState<Set<number>>(new Set());
+  // Persistence: the id of the current history document. Set after `submit()` succeeds
+  // OR when a screen is re-opened from Library via the `historyId` param.
+  const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
+  // Account-picker state (Option C: hybrid — company drives defaults, user can override).
+  const [accountsMap, setAccountsMap] = useState<AccountsMap | null>(null);
+  const [selectedAccounts, setSelectedAccounts] = useState<SelectedAccounts>({});
+  const [pickerVisible, setPickerVisible] = useState(false);
 
   const loadActiveCompany = useCallback(async () => {
     try {
@@ -62,15 +70,64 @@ export default function GenerateScreen() {
   useEffect(() => {
     if (historyId) {
       (async () => {
-        const list = await api.listHistory();
-        const item = (list.items || []).find((i: any) => i.id === historyId);
-        if (item) {
-          setForm(item.input || {});
-          setOutput(item.output?.data);
+        try {
+          // Full detail endpoint returns saved images (base64) + selected_accounts overrides.
+          const item = await api.getHistoryItem(historyId as string);
+          if (item) {
+            setForm(item.input_params || item.input || {});
+            setOutput(item.output?.data || item.output);
+            setCurrentHistoryId(item.id);
+            setSelectedAccounts(item.selected_accounts || {});
+            // Rehydrate `imageMap` from saved variant images
+            const imgs = item.images || {};
+            const nextMap: Record<number, { uri: string }> = {};
+            Object.keys(imgs).forEach((k) => {
+              const v = imgs[k];
+              if (v?.data) {
+                nextMap[Number(k)] = { uri: `data:${v.mime || "image/png"};base64,${v.data}` };
+              }
+            });
+            if (Object.keys(nextMap).length) setImageMap(nextMap);
+          }
+        } catch (e) {
+          // swallow — screen still works even if load fails
         }
       })();
     }
   }, [historyId]);
+
+  // Load all available social accounts once so the picker can render quickly.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api.socialAllAccounts();
+        setAccountsMap(res);
+        // If nothing chosen yet, seed from the active company's linked_accounts.
+        if (activeCompany?.linked_accounts && !Object.keys(selectedAccounts).length) {
+          const linked = activeCompany.linked_accounts;
+          const seed: SelectedAccounts = {};
+          if (linked.linkedin) seed.linkedin = linked.linkedin;
+          if (linked.instagram) seed.instagram = linked.instagram;
+          // FB: linked_accounts stores a Composio connection, not a Page id.
+          // Auto-pick the first Page returned for that account (best-effort).
+          if (res?.facebook_pages?.length) seed.facebook = res.facebook_pages[0].id;
+          if (Object.keys(seed).length) setSelectedAccounts(seed);
+        }
+      } catch (_e) {
+        // non-fatal
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCompany?.id]);
+
+  // Persist selected_accounts back to the history doc whenever the user changes them
+  // (Option C — the override is remembered next time this history entry is opened).
+  useEffect(() => {
+    if (!currentHistoryId) return;
+    if (!Object.keys(selectedAccounts).length) return;
+    // Fire-and-forget; failure isn't user-facing.
+    api.patchHistoryItem(currentHistoryId, { selected_accounts: selectedAccounts }).catch(() => {});
+  }, [selectedAccounts, currentHistoryId]);
 
   const suggestTopics = async () => {
     setTopicLoading(true);
@@ -90,9 +147,14 @@ export default function GenerateScreen() {
     setErr(null);
     setLoading(true);
     setOutput(null);
+    // Reset per-generation state — new outputs get a new history entry.
+    setImageMap({});
+    setCurrentHistoryId(null);
     try {
       const res = await api.generate(meta.backendType, form);
       setOutput(res.output);
+      // Capture the fresh history id so subsequent image generations can persist onto it.
+      if (res?.id) setCurrentHistoryId(res.id);
     } catch (e: any) {
       setErr(e?.message?.includes("502") ? "AI service is busy. Try again in a moment." : (e?.message || "Something went wrong"));
     } finally {
@@ -127,7 +189,14 @@ export default function GenerateScreen() {
         image_mime = m?.[1] || "image/png";
       }
       // Never pass a data: URI as image_url — Instagram needs a real HTTPS URL
-      await api.socialPost(platform, content, { image_b64, image_mime });
+      // Include the picker's per-platform account override (Option C hybrid).
+      const override = selectedAccounts?.[platform];
+      const opts: any = { image_b64, image_mime, history_id: currentHistoryId || undefined };
+      if (override) {
+        if (platform === "facebook") opts.page_id = override;
+        else opts.connection_id = override;
+      }
+      await api.socialPost(platform, content, opts);
       const withImage = !!image_b64;
       setToast(`Posted to ${platform.charAt(0).toUpperCase() + platform.slice(1)}${withImage ? " with image" : ""} ✓`);
       setTimeout(() => setToast(null), 2000);
@@ -148,6 +217,11 @@ export default function GenerateScreen() {
     try {
       const customPrompt = imagePromptMap[idx]?.trim();
       const payload: any = customPrompt ? { prompt: customPrompt } : { hook, body };
+      // Persist onto the current history doc so the image survives navigation.
+      if (currentHistoryId) {
+        payload.history_id = currentHistoryId;
+        payload.variant_index = idx;
+      }
       const res = await api.generatePostImage(payload);
       const uri = `data:${res.mime_type || "image/png"};base64,${res.data}`;
       setImageMap((m) => ({ ...m, [idx]: { uri, loading: false } }));
@@ -174,6 +248,8 @@ export default function GenerateScreen() {
         scheduled_for: isoDatetime,
         image_b64,
         image_mime,
+        history_id: currentHistoryId || undefined,
+        selected_accounts: selectedAccounts,
       });
       setScheduledIdx((s) => new Set(s).add(idx));
       setSchedulerIdx(null);
@@ -248,6 +324,16 @@ export default function GenerateScreen() {
             <Text style={styles.companyBannerEmptyText}>No active company — set one up in Settings for personalized output.</Text>
           </TouchableOpacity>
         )}
+
+        {/* Post-as pill — visible once we have an output to post. Opens the AccountPicker (Option C). */}
+        {output && meta.canPostLinkedIn ? (
+          <AccountSummary
+            selected={selectedAccounts}
+            accounts={accountsMap}
+            platforms={["linkedin", "facebook", "instagram"]}
+            onPress={() => setPickerVisible(true)}
+          />
+        ) : null}
 
         {/* Topic suggester (only for Social Post) */}
         {t === "linkedin-post" && (
@@ -355,6 +441,16 @@ export default function GenerateScreen() {
           hasImage={!!imageMap[schedulerIdx]?.uri}
         />
       )}
+
+      {/* Per-post account picker (Option C hybrid). Choice is persisted on the history doc. */}
+      <AccountPicker
+        visible={pickerVisible}
+        onClose={() => setPickerVisible(false)}
+        platforms={["linkedin", "facebook", "instagram"]}
+        selected={selectedAccounts}
+        onChange={setSelectedAccounts}
+        title="Choose the account for this post"
+      />
 
       {toast && (
         <View testID="gen-toast" style={[styles.toast, { bottom: insets.bottom + 80 }]}>

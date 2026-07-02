@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 9 backend verification COMPLETE. All 15/15 pytest tests pass (100%) against local backend at http://localhost:8001 with LIVE Composio + LIVE Emergent LLM (Claude cold-email + Gemini image). Verified both features: (A) image persistence on history entries via POST /api/generate/post-image with history_id/variant_index, new GET /api/history/{id} (includes images), list GET /api/history excludes images for perf, new PATCH /api/history/{id} with whitelist + 401/400/404 handling; and (B) per-post social account picker via new GET /api/social/all-accounts (returns {linkedin, facebook_pages, instagram} — clean empty shape for fresh users, no crash without configs), plus connection_id/page_id overrides on POST /api/social/{platform}/post and selected_accounts on POST /api/scheduled. All regression paths still return clean {success:false, error:...} for unconnected users. Backend logs confirm the overrides reach Composio (log shows connection lookup failures for the override IDs, as expected).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "internal",
+        "issue": "Duplicate `_build_post_args` function definition in /app/backend/server.py at lines 1178 and 1268. Python uses the second (which sets facebook `text` + `url`); the first (which sets `message`) is dead code. Harmless but confusing — recommend deleting the first duplicate."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_9.py",
+    "/app/test_reports/pytest/iteration_9_results.xml"
+  ],
+  "action_items": [
+    "(Optional cleanup) Remove the duplicate `_build_post_args` at server.py line 1178 — the version at line 1268 is the one Python actually uses."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 2299 lines — exceeds the 700-line guideline. Consider splitting into modules (routes/history.py, routes/social.py, routes/scheduled.py, services/composio.py, services/llm.py). Not blocking, but will become painful to maintain.",
+    "PATCH /api/history/{id} whitelist is well-implemented — rejects unknown fields with 400, returns 404 when doc not found, updated_at is bumped. Good.",
+    "POST /api/generate/post-image image persistence uses `images.{index}` dotted-set which correctly creates a Mongo subdocument. GET /api/history returns the full doc (verified images.0 present after post-image call).",
+    "GET /api/history list correctly projects out `images` (`{_id: 0, images: 0}`) — verified in tests. Good perf safeguard.",
+    "GET /api/social/all-accounts gracefully handles missing auth configs and Composio SDK exceptions per-platform (continue on failure), so a broken FB config won't take down LI+IG.",
+    "Scheduler `_execute_social_post` signature updated with selected_accounts arg and correctly threaded through from scheduled_posts loop (line 2018-2022)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_9.py (new file)"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15)",
+    "frontend": "N/A (backend-only per request)"
+  },
+  "seed_data_creation": "Each test module run creates one fresh user (X-User-Id = it9-<uuid12>) with one cold-email history entry and one scheduled post (auto-deleted). No persistent seed data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 9 features (history image persistence + per-post social account picker) are all green. Test file /app/backend/tests/test_iteration_9.py covers auth (401), detail (200 + images map), list (images excluded), post-image persistence, PATCH whitelist (400) + 404, all-accounts unified endpoint, LinkedIn connection_id override, Facebook page_id override, scheduled selected_accounts persistence, and unconnected regressions for IG/LI. Note: Instagram unconnected-error test must pass a stub image_b64 because IG endpoint short-circuits with 400 'instagram requires an image' before hitting Composio.",
+  "rca_of_issue": "N/A — no failures. One test initially failed because IG endpoint requires image_b64 before running Composio; adjusted the test to include a 1x1 PNG stub so it exercises the actual unconnected path (returns 200 with success:false)."
+}

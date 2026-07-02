@@ -69,6 +69,7 @@ export const api = {
     request<any>(`/social/${platform}/disconnect`, { method: "POST" }),
   socialAccounts: (platform: string) =>
     request<any>(`/social/${platform}/accounts`),
+  socialAllAccounts: () => request<any>("/social/all-accounts"),
   deleteSocialAccount: (platform: string, id: string) =>
     request<any>(`/social/${platform}/accounts/${id}`, { method: "DELETE" }),
   linkAccountToCompany: (companyId: string, platform: string, connected_account_id: string | null) =>
@@ -76,7 +77,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ platform, connected_account_id }),
     }),
-  socialPost: async (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string }) => {
+  socialPost: async (platform: string, content: string, options?: { image_url?: string; image_b64?: string; image_mime?: string; connection_id?: string; page_id?: string; history_id?: string }) => {
     const res = await request<any>(`/social/${platform}/post`, {
       method: "POST",
       body: JSON.stringify({ content, ...(options || {}) }),
@@ -90,8 +91,14 @@ export const api = {
     return res;
   },
 
-  // Image generation
-  generatePostImage: (body: { hook?: string; body?: string; prompt?: string }) =>
+  // History detail + partial update (for images + selected_accounts persistence)
+  getHistoryItem: (id: string) => request<any>(`/history/${id}`),
+  patchHistoryItem: (id: string, patch: any) =>
+    request<any>(`/history/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  // Image generation — pass history_id + variant_index so the image is persisted onto
+  // the history doc and survives navigation.
+  generatePostImage: (body: { hook?: string; body?: string; prompt?: string; history_id?: string; variant_index?: number }) =>
     request<any>("/generate/post-image", {
       method: "POST",
       body: JSON.stringify(body),
