@@ -2024,6 +2024,87 @@ async def _scheduler_loop():
         await asyncio.sleep(60)
 
 
+def _linkedin_display_name(data: Any) -> Optional[str]:
+    """Extract a human name from a LinkedIn userinfo/me response, handling both the
+    OpenID Connect flat shape and the legacy /v2/me nested-localized shape.
+    """
+    if not isinstance(data, dict):
+        return None
+    # OpenID Connect (/userinfo): {"sub":..., "name":"Alex Rivera", "given_name":"Alex", ...}
+    if isinstance(data.get("name"), str) and data["name"].strip():
+        return data["name"].strip()
+    gn = data.get("given_name") or data.get("givenName")
+    fn = data.get("family_name") or data.get("familyName")
+    if isinstance(gn, str) or isinstance(fn, str):
+        combined = " ".join(x for x in (gn, fn) if isinstance(x, str) and x.strip())
+        if combined:
+            return combined
+
+    # Legacy /v2/me: firstName / lastName each have {localized: {"en_US": "Alex"}}
+    def _localized(field: str) -> Optional[str]:
+        f = data.get(field)
+        if isinstance(f, dict):
+            loc = f.get("localized")
+            if isinstance(loc, dict) and loc:
+                for v in loc.values():
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return None
+
+    lfn = _localized("firstName") or data.get("localizedFirstName")
+    lln = _localized("lastName") or data.get("localizedLastName")
+    if lfn or lln:
+        combined = " ".join(x for x in (lfn, lln) if isinstance(x, str) and x.strip())
+        if combined:
+            return combined
+
+    if isinstance(data.get("vanityName"), str) and data["vanityName"].strip():
+        return data["vanityName"].strip()
+
+    # One level of nested search (Composio wrappers occasionally add a `response` layer)
+    for key in ("data", "response", "profile", "user", "result"):
+        v = data.get(key)
+        if isinstance(v, dict):
+            nested = _linkedin_display_name(v)
+            if nested:
+                return nested
+    return None
+
+
+def _instagram_display_name_and_id(data: Any) -> tuple:
+    """Return (display_name, ig_user_id) from an Instagram Graph response."""
+    if not isinstance(data, dict):
+        return (None, None)
+
+    def _pick_username(d):
+        if not isinstance(d, dict):
+            return None
+        for k in ("username", "handle", "name", "instagram_username"):
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip().lstrip("@")
+        return None
+
+    def _pick_id(d):
+        return _extract_first(d, ["ig_user_id", "instagram_business_account_id", "instagram_id", "user_id", "id"])
+
+    # Try the top level first
+    uname = _pick_username(data)
+    ig_id = _pick_id(data)
+
+    # If missing, try nested wrappers Composio sometimes uses
+    if not uname or not ig_id:
+        for key in ("data", "response", "user", "account", "result"):
+            v = data.get(key)
+            if isinstance(v, dict):
+                uname = uname or _pick_username(v)
+                ig_id = ig_id or _pick_id(v)
+            elif isinstance(v, list) and v and isinstance(v[0], dict):
+                uname = uname or _pick_username(v[0])
+                ig_id = ig_id or _pick_id(v[0])
+    return (uname, ig_id)
+
+
 @api_router.get("/social/all-accounts")
 async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
     """Unified account list for the account picker UI.
@@ -2061,15 +2142,16 @@ async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
                 display_name = None
                 try:
                     info = await _composio_call(user_id, "LINKEDIN_GET_MY_INFO", {}, connected_account_id=conn_id)
-                    if info["success"] and isinstance(info["data"], dict):
-                        d = info["data"]
-                        display_name = d.get("name") or d.get("given_name") or d.get("localizedFirstName")
-                except Exception:
-                    pass
+                    if info["success"]:
+                        display_name = _linkedin_display_name(info["data"])
+                        if not display_name:
+                            logger.info(f"LinkedIn user info returned but name not parseable: {str(info['data'])[:400]}")
+                except Exception as e:
+                    logger.warning(f"LinkedIn discovery for {conn_id[-6:]} failed: {e}")
                 out["linkedin"].append({
                     "id": conn_id,
                     "connection_id": conn_id,
-                    "display_name": display_name or f"LinkedIn account …{conn_id[-6:]}",
+                    "display_name": display_name or "LinkedIn account (unnamed)",
                     "kind": "linkedin",
                 })
 
@@ -2078,16 +2160,17 @@ async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
                 ig_user_id = None
                 try:
                     info = await _composio_call(user_id, "INSTAGRAM_GET_USER_INFO", {}, connected_account_id=conn_id)
-                    if info["success"] and isinstance(info["data"], dict):
-                        d = info["data"]
-                        display_name = d.get("username") or d.get("name")
-                        ig_user_id = _extract_first(d, ["ig_user_id", "instagram_business_account_id", "instagram_id", "user_id", "id"])
-                except Exception:
-                    pass
+                    if info["success"]:
+                        uname, ig_user_id = _instagram_display_name_and_id(info["data"])
+                        display_name = uname
+                        if not uname:
+                            logger.info(f"Instagram user info returned but handle not parseable: {str(info['data'])[:400]}")
+                except Exception as e:
+                    logger.warning(f"Instagram discovery for {conn_id[-6:]} failed: {e}")
                 out["instagram"].append({
                     "id": conn_id,
                     "connection_id": conn_id,
-                    "display_name": (f"@{display_name}" if display_name else f"Instagram account …{conn_id[-6:]}"),
+                    "display_name": (f"@{display_name}" if display_name else "Instagram account (unnamed)"),
                     "ig_user_id": str(ig_user_id) if ig_user_id else None,
                     "kind": "instagram",
                 })
@@ -2097,6 +2180,7 @@ async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
                 try:
                     pages_res = await _composio_call(user_id, "FACEBOOK_LIST_MANAGED_PAGES", {}, connected_account_id=conn_id)
                     if not pages_res["success"]:
+                        logger.warning(f"Facebook LIST_MANAGED_PAGES failed for {conn_id[-6:]}: {pages_res.get('error_raw')}")
                         continue
                     data = pages_res["data"]
                     page_items: List[Dict[str, Any]] = []
@@ -2114,19 +2198,69 @@ async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
                         if not isinstance(pg, dict):
                             continue
                         pid = pg.get("id") or pg.get("page_id")
-                        pname = pg.get("name") or pg.get("page_name")
+                        pname = (
+                            pg.get("name")
+                            or pg.get("page_name")
+                            or pg.get("display_name")
+                            or pg.get("title")
+                        )
                         if not pid:
                             continue
+                        if not pname:
+                            logger.info(f"FB page name not parseable for id={pid}: keys={list(pg.keys())[:12]}")
                         out["facebook_pages"].append({
                             "id": str(pid),
                             "page_id": str(pid),
                             "connection_id": conn_id,
-                            "display_name": pname or f"Facebook Page {str(pid)[-6:]}",
+                            "display_name": pname or "Facebook Page (unnamed)",
                             "kind": "facebook_page",
                         })
                 except Exception as e:
                     logger.warning(f"FB page expand failed: {e}")
 
+    return out
+
+
+@api_router.get("/social/all-accounts/debug")
+async def debug_social_accounts_raw(user_id: str = Depends(get_user_id)):
+    """Admin-only helper: returns the RAW Composio responses for each connected
+    account so we can see what field names to parse. Use this when the picker
+    shows "(unnamed)" and we need to add another field-name fallback.
+    """
+    profile = await db.users.find_one({"user_id": user_id}) or {}
+    if not profile.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    import asyncio
+    out: Dict[str, List[Dict[str, Any]]] = {"linkedin": [], "facebook": [], "instagram": []}
+    for platform in ("linkedin", "instagram", "facebook"):
+        auth_config_id = SOCIAL_AUTH_CONFIGS.get(platform, "")
+        if not auth_config_id:
+            continue
+
+        def _list(aid=auth_config_id):
+            client = _composio_client()
+            return client.connected_accounts.list(user_ids=[user_id], auth_config_ids=[aid])
+        try:
+            result = await asyncio.to_thread(_list)
+        except Exception as e:
+            out[platform].append({"error": str(e)})
+            continue
+        items = getattr(result, "items", None) or list(result or [])
+        for it in items:
+            conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+            status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
+            entry: Dict[str, Any] = {"connection_id": conn_id, "status": status}
+            if platform == "linkedin":
+                r = await _composio_call(user_id, "LINKEDIN_GET_MY_INFO", {}, connected_account_id=conn_id)
+                entry["LINKEDIN_GET_MY_INFO"] = {"success": r["success"], "data": r["data"], "error": str(r.get("error_raw") or "")[:400]}
+            elif platform == "instagram":
+                r = await _composio_call(user_id, "INSTAGRAM_GET_USER_INFO", {}, connected_account_id=conn_id)
+                entry["INSTAGRAM_GET_USER_INFO"] = {"success": r["success"], "data": r["data"], "error": str(r.get("error_raw") or "")[:400]}
+            elif platform == "facebook":
+                r = await _composio_call(user_id, "FACEBOOK_LIST_MANAGED_PAGES", {}, connected_account_id=conn_id)
+                entry["FACEBOOK_LIST_MANAGED_PAGES"] = {"success": r["success"], "data": r["data"], "error": str(r.get("error_raw") or "")[:400]}
+            out[platform].append(entry)
     return out
 
 
