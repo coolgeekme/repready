@@ -1265,17 +1265,10 @@ async def _linkedin_get_author_urn(user_id: str) -> str:
     return author_urn
 
 
-def _build_post_args(platform: str, content: str, image_url: Optional[str], author_urn: Optional[str]) -> Dict[str, Any]:
-    if platform == "linkedin":
-        return {"author": author_urn or "", "commentary": content}
-    if platform == "facebook":
-        args: Dict[str, Any] = {"text": content}
-        if image_url:
-            # FACEBOOK_CREATE_POST accepts an optional photo URL field
-            args["url"] = image_url
-        return args
-    if platform == "instagram":
-        return {"caption": content, "image_url": image_url or ""}
+def _build_post_args_LEGACY_STALE_REMOVED(*args, **kwargs) -> Dict[str, Any]:
+    # This function was previously duplicated later in the file, causing the newer
+    # (correct) definition at ~L1178 to be silently overridden. Kept as a no-op stub
+    # in case any dynamic caller references it — the real helper is _build_post_args.
     return {}
 
 
