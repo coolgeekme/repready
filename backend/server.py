@@ -1624,7 +1624,20 @@ async def _post_to_instagram(user_id: str, caption: str, image_url: str, connect
     if not image_url:
         return {"success": False, "platform": "instagram", "error": "Instagram requires an image."}
 
-    ig = await _instagram_get_user_id(user_id, connected_account_id)
+    async def _get_ig_id(force_refresh: bool = False):
+        if force_refresh:
+            # Clear whatever we cached for this connection so discovery is fresh.
+            cache_key = connected_account_id or "_default"
+            try:
+                await db.users.update_one(
+                    {"user_id": user_id},
+                    {"$unset": {f"instagram_user_ids.{cache_key}": ""}},
+                )
+            except Exception:
+                pass
+        return await _instagram_get_user_id(user_id, connected_account_id)
+
+    ig = await _get_ig_id()
     ig_user_id = ig.get("id")
     if not ig_user_id:
         raw = ig.get("error") or ""
@@ -1637,16 +1650,43 @@ async def _post_to_instagram(user_id: str, caption: str, image_url: str, connect
             msg = "Couldn't fetch your Instagram Business account ID. Reconnect Instagram in Settings and make sure it's a Business/Creator account linked to a Facebook Page."
         return {"success": False, "platform": "instagram", "error": msg}
 
-    # Phase 1: container creation
-    container = await _composio_call(
-        user_id,
-        "INSTAGRAM_CREATE_MEDIA_CONTAINER",
-        {"ig_user_id": ig_user_id, "image_url": image_url, "caption": caption},
-        connected_account_id=connected_account_id,
-    )
+    async def _try_container(uid: str):
+        return await _composio_call(
+            user_id,
+            "INSTAGRAM_CREATE_MEDIA_CONTAINER",
+            {"ig_user_id": uid, "image_url": image_url, "caption": caption},
+            connected_account_id=connected_account_id,
+        )
+
+    container = await _try_container(ig_user_id)
+
+    # If Meta says the object doesn't exist / missing permissions, our cached
+    # ig_user_id is likely stale (user reconnected or picked a different account).
+    # Invalidate the cache and try once more with a fresh discovery.
     if not container["success"]:
-        logger.error(f"Composio instagram container failed (provider): {str(container.get('error_raw'))[:500]}")
-        return {"success": False, "platform": "instagram", "error": _humanize_provider_error(container.get("error_raw"), "instagram")}
+        raw = str(container.get("error_raw") or "").lower()
+        if ("does not exist" in raw) or ("missing permissions" in raw) or ("object with id" in raw):
+            logger.info(f"IG container failed with cache-stale hint; refreshing ig_user_id for {connected_account_id or 'default'}")
+            ig = await _get_ig_id(force_refresh=True)
+            fresh_id = ig.get("id")
+            if fresh_id and fresh_id != ig_user_id:
+                ig_user_id = fresh_id
+                container = await _try_container(ig_user_id)
+
+    if not container["success"]:
+        raw = str(container.get("error_raw") or "")
+        low = raw.lower()
+        # Craft the most useful message we can for common Meta failures.
+        if ("does not exist" in low) or ("missing permissions" in low) or ("object with id" in low):
+            msg = ("This Instagram account isn't set up for publishing yet. It needs to be a Business or "
+                   "Creator account linked to a Facebook Page you administer. Open Instagram → Settings → "
+                   "Account → Switch to Professional Account, then reconnect it in SalesReady.")
+        elif "invalid parameter" in low or "unsupported request" in low:
+            msg = "Instagram rejected the request. Make sure the image is a JPG/PNG under 8MB and try again."
+        else:
+            msg = _humanize_provider_error(container.get("error_raw"), "instagram")
+        logger.error(f"Composio instagram container failed (provider): {raw[:500]}")
+        return {"success": False, "platform": "instagram", "error": msg}
 
     creation_id = _extract_first(container["data"], ["creation_id", "container_id", "id"])
     if not creation_id:
@@ -2157,6 +2197,15 @@ async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
                             logger.info(f"LinkedIn user info returned but name not parseable: {str(info['data'])[:400]}")
                 except Exception as e:
                     logger.warning(f"LinkedIn discovery for {conn_id[-6:]} failed: {e}")
+                # Fallback: the ConnectedAccount object itself may carry profile info from
+                # the OAuth callback (Composio stores it under `params`/`metadata`/`data`).
+                if not display_name:
+                    for attr in ("params", "metadata", "data"):
+                        v = getattr(it, attr, None) if not isinstance(it, dict) else it.get(attr)
+                        if v:
+                            display_name = _linkedin_display_name(v) or _extract_first(v, ["name", "email", "given_name", "vanityName"])
+                            if display_name:
+                                break
                 out["linkedin"].append({
                     "id": conn_id,
                     "connection_id": conn_id,
@@ -2176,6 +2225,15 @@ async def list_all_social_accounts(user_id: str = Depends(get_user_id)):
                             logger.info(f"Instagram user info returned but handle not parseable: {str(info['data'])[:400]}")
                 except Exception as e:
                     logger.warning(f"Instagram discovery for {conn_id[-6:]} failed: {e}")
+                # Same connected-account metadata fallback
+                if not display_name:
+                    for attr in ("params", "metadata", "data"):
+                        v = getattr(it, attr, None) if not isinstance(it, dict) else it.get(attr)
+                        if v:
+                            uname2, _iid = _instagram_display_name_and_id(v)
+                            if uname2:
+                                display_name = uname2
+                                break
                 out["instagram"].append({
                     "id": conn_id,
                     "connection_id": conn_id,
