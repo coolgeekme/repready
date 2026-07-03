@@ -110,6 +110,8 @@ export const api = {
 
   // Companies
   listCompanies: () => request<any>("/companies"),
+  activateCompany: (companyId: string) =>
+    request<any>(`/companies/${companyId}/activate`, { method: "POST" }),
   createCompany: (body: any) => request<any>("/companies", { method: "POST", body: JSON.stringify(body) }),
   updateCompany: (id: string, body: any) => request<any>(`/companies/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteCompany: (id: string) => request<any>(`/companies/${id}`, { method: "DELETE" }),

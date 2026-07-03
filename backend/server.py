@@ -350,10 +350,19 @@ def _extract_json(text: str) -> Any:
 
 
 async def _llm_generate_json(system_msg: str, user_msg: str) -> Any:
+    # Ground the model in reality: without this, Claude will happily reference an outdated
+    # "current year" in generated content. Prepend today's date to every system message.
+    today = datetime.now(timezone.utc)
+    date_hint = (
+        f"Today's date is {today.strftime('%A, %B %-d, %Y')} (ISO: {today.strftime('%Y-%m-%d')}). "
+        f"Use this as the current date whenever you reference dates, seasons, or 'this year'. "
+        f"Never claim it is any other year.\n\n"
+    )
+    full_system = date_hint + system_msg
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"repready-{uuid.uuid4()}",
-        system_message=system_msg,
+        system_message=full_system,
     ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=3500)
 
     response = await chat.send_message(UserMessage(text=user_msg))

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Image } from "react-native";
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Image, Modal, Pressable } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
@@ -50,16 +50,39 @@ export default function GenerateScreen() {
   const [accountsMap, setAccountsMap] = useState<AccountsMap | null>(null);
   const [selectedAccounts, setSelectedAccounts] = useState<SelectedAccounts>({});
   const [pickerVisible, setPickerVisible] = useState(false);
+  // Company switcher: list of user's companies + a bottom-sheet toggle so they can
+  // change context inline (Option: right on the generator screen, per user request).
+  const [allCompanies, setAllCompanies] = useState<any[]>([]);
+  const [companyPickerVisible, setCompanyPickerVisible] = useState(false);
+  // Per-variation edit mode: `editedContent[i]` overrides the auto-composed post text
+  // when non-null. Used for LinkedIn/Facebook/Instagram posts + copy button.
+  const [editedContent, setEditedContent] = useState<Record<number, string>>({});
+  const [editingIdx, setEditingIdx] = useState<Set<number>>(new Set());
 
   const loadActiveCompany = useCallback(async () => {
     try {
       const res = await api.listCompanies();
+      setAllCompanies(res.items || []);
       const active = (res.items || []).find((c: any) => c.id === res.active_id);
       setActiveCompany(active || null);
     } catch (e: any) {
       setActiveCompany(null);
     }
   }, []);
+
+  const switchCompany = async (companyId: string) => {
+    setCompanyPickerVisible(false);
+    try {
+      await api.activateCompany(companyId);
+      await loadActiveCompany();
+      // Re-seed the account picker with the new company's linked accounts
+      setSelectedAccounts({});
+      setToast("Company switched ✓");
+      setTimeout(() => setToast(null), 1500);
+    } catch (e: any) {
+      setErr(e?.message || "Couldn't switch company");
+    }
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -285,12 +308,13 @@ export default function GenerateScreen() {
       >
         <Text style={styles.subtitle}>{meta.subtitle}</Text>
 
-        {/* Active company context banner — shows which business this generation will use */}
+        {/* Active company context banner — tap to switch active company right here on the generator */}
         {activeCompany ? (
           <TouchableOpacity
             testID="active-company-banner"
             style={styles.companyBanner}
-            onPress={() => router.push(`/company/${activeCompany.id}`)}
+            onPress={() => setCompanyPickerVisible(true)}
+            onLongPress={() => router.push(`/company/${activeCompany.id}`)}
             activeOpacity={0.85}
           >
             <View style={styles.companyBannerIcon}>
@@ -414,6 +438,10 @@ export default function GenerateScreen() {
               setImagePromptMap,
               scheduledIdx,
               meta.canPostLinkedIn ? (i: number) => setSchedulerIdx(i) : undefined,
+              editedContent,
+              editingIdx,
+              setEditingIdx,
+              setEditedContent,
             )}
           </View>
         )}
@@ -427,7 +455,11 @@ export default function GenerateScreen() {
           onConfirm={async (iso, plats) => {
             const variants = output?.variations || [];
             const v = variants[schedulerIdx!];
-            const content = v ? `${v.hook}\n\n${v.body}\n\n${v.hashtags || ""}`.trim() : "";
+            const auto = v ? `${v.hook}\n\n${v.body}\n\n${v.hashtags || ""}`.trim() : "";
+            // Prefer the user's edited content over the auto-composed version.
+            const content = (editedContent && typeof editedContent[schedulerIdx!] === "string")
+              ? editedContent[schedulerIdx!]
+              : auto;
             await handleScheduleConfirm(schedulerIdx!, content, iso, plats);
           }}
           contentPreview={(() => {
@@ -451,6 +483,74 @@ export default function GenerateScreen() {
         onChange={setSelectedAccounts}
         title="Choose the account for this post"
       />
+
+      {/* Company switcher — inline bottom sheet so users can change active company
+          right on the generator screen (no navigating to Settings). Long-press the
+          banner to jump into that company's detail screen. */}
+      <Modal
+        visible={companyPickerVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCompanyPickerVisible(false)}
+      >
+        <Pressable style={pickerStyles.backdrop} onPress={() => setCompanyPickerVisible(false)}>
+          <Pressable style={pickerStyles.sheet} onPress={(e) => e.stopPropagation()}>
+            <View style={pickerStyles.grabber} />
+            <View style={pickerStyles.header}>
+              <Text style={pickerStyles.title}>Switch active company</Text>
+              <TouchableOpacity onPress={() => setCompanyPickerVisible(false)} hitSlop={12}>
+                <Ionicons name="close" size={22} color={colors.textSubtle} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ maxHeight: 420 }}>
+              {allCompanies.length === 0 ? (
+                <Text style={pickerStyles.emptyText}>
+                  You don&apos;t have any companies yet. Add one from Settings → Companies.
+                </Text>
+              ) : (
+                allCompanies.map((c) => {
+                  const chosen = activeCompany?.id === c.id;
+                  return (
+                    <TouchableOpacity
+                      key={c.id}
+                      testID={`company-switch-${c.id}`}
+                      style={[pickerStyles.row, chosen && pickerStyles.rowChosen]}
+                      onPress={() => switchCompany(c.id)}
+                      activeOpacity={0.75}
+                    >
+                      <View style={pickerStyles.rowIcon}>
+                        <Ionicons name="business" size={16} color={colors.primary} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={pickerStyles.rowName} numberOfLines={1}>{c.name}</Text>
+                        {c.industry ? (
+                          <Text style={pickerStyles.rowMeta} numberOfLines={1}>{c.industry}</Text>
+                        ) : null}
+                      </View>
+                      {chosen ? (
+                        <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
+                      ) : (
+                        <View style={pickerStyles.radio} />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+            </ScrollView>
+            <TouchableOpacity
+              testID="company-picker-manage"
+              style={pickerStyles.manageBtn}
+              onPress={() => {
+                setCompanyPickerVisible(false);
+                router.push("/(tabs)/settings" as any);
+              }}
+            >
+              <Ionicons name="settings-outline" size={16} color={colors.primary} />
+              <Text style={pickerStyles.manageBtnText}>Manage companies</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {toast && (
         <View testID="gen-toast" style={[styles.toast, { bottom: insets.bottom + 80 }]}>
@@ -512,6 +612,10 @@ function renderOutput(
   setImagePromptMap?: (fn: any) => void,
   scheduledIdx?: Set<number>,
   onSchedule?: (idx: number) => void,
+  editedContent?: Record<number, string>,
+  editingIdx?: Set<number>,
+  setEditingIdx?: (fn: any) => void,
+  setEditedContent?: (fn: any) => void,
 ) {
   if (t === "cold-email") {
     return (out.variations || []).map((v: any, i: number) => (
@@ -607,7 +711,10 @@ function renderOutput(
       }
       const tagLine = (v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ");
       if (tagLine) parts.push(tagLine);
-      const full = parts.join("\n\n");
+      const autoFull = parts.join("\n\n");
+      // If the user has edited this variation, prefer their text for copy/post/schedule.
+      const isEditing = editingIdx?.has(i);
+      const full = (editedContent && typeof editedContent[i] === "string") ? editedContent[i] : autoFull;
       const img = imageMap?.[i];
       const renderPlatformBtn = (platform: "linkedin" | "facebook" | "instagram", icon: keyof typeof Ionicons.glyphMap, color: string, label: string) => {
         const key = `${platform}-${i}`;
@@ -634,12 +741,50 @@ function renderOutput(
         <ResultCard
           key={i}
           index={i + 1}
-          tag="Post"
+          tag={isEditing ? "Editing" : "Post"}
           onCopy={() => onCopy(full)}
         >
-          <Text style={styles.hook}>{v.hook}</Text>
-          <Text style={styles.body}>{v.body}</Text>
-          <Text style={styles.tags}>{(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}</Text>
+          {/* Edit / Done toggle — sits next to the Copy button */}
+          <TouchableOpacity
+            testID={`edit-toggle-${i}`}
+            style={styles.editBtn}
+            onPress={() => {
+              if (!setEditingIdx || !setEditedContent) return;
+              setEditingIdx((prev: Set<number>) => {
+                const next = new Set(prev);
+                if (next.has(i)) {
+                  next.delete(i);
+                } else {
+                  next.add(i);
+                  // Seed the editor with the current composed text if empty.
+                  setEditedContent((old: Record<number, string>) => ({ ...old, [i]: (typeof old[i] === "string" ? old[i] : autoFull) }));
+                }
+                return next;
+              });
+            }}
+            hitSlop={8}
+          >
+            <Ionicons name={isEditing ? "checkmark" : "create-outline"} size={16} color={colors.primary} />
+          </TouchableOpacity>
+
+          {isEditing ? (
+            <TextInput
+              testID={`edit-input-${i}`}
+              multiline
+              value={(editedContent && editedContent[i]) ?? autoFull}
+              onChangeText={(t) => setEditedContent && setEditedContent((old: Record<number, string>) => ({ ...old, [i]: t }))}
+              style={styles.editArea}
+              placeholder="Type your post..."
+              placeholderTextColor={colors.textSubtle}
+              autoFocus
+            />
+          ) : (
+            <>
+              <Text style={styles.hook}>{v.hook}</Text>
+              <Text style={styles.body}>{v.body}</Text>
+              <Text style={styles.tags}>{(v.hashtags || []).map((h: string) => (h.startsWith("#") ? h : `#${h}`)).join(" ")}</Text>
+            </>
+          )}
 
           {/* Image area */}
           {img?.uri ? (
@@ -816,4 +961,25 @@ const styles = StyleSheet.create({
   scheduleBtn: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10, paddingVertical: 12, paddingHorizontal: 14, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   scheduleBtnDone: { borderColor: "#16a34a", backgroundColor: "#ECFDF5" },
   scheduleBtnText: { color: colors.text, fontWeight: "700", fontSize: 13, flex: 1 },
+
+  // Post-content edit mode
+  editBtn: { position: "absolute", top: 12, right: 42, padding: 6, borderRadius: 999, backgroundColor: "#eef2ff" },
+  editArea: { marginTop: 4, marginBottom: 8, padding: 12, borderRadius: radii.sm, borderWidth: 1.5, borderColor: colors.primary, backgroundColor: "#fafbff", minHeight: 180, fontSize: 14, lineHeight: 20, color: colors.text, textAlignVertical: "top" },
+});
+
+const pickerStyles = StyleSheet.create({
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: spacing.lg, paddingTop: 8, paddingBottom: 20, maxHeight: "82%" },
+  grabber: { alignSelf: "center", width: 44, height: 4, borderRadius: 2, backgroundColor: "#dcdcdc", marginBottom: 12 },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  title: { fontSize: 18, fontWeight: "800", color: colors.text },
+  emptyText: { fontSize: 13, color: colors.textSubtle, textAlign: "center", padding: 24, lineHeight: 20 },
+  row: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 12, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, marginBottom: 6, backgroundColor: "#fff" },
+  rowChosen: { borderColor: colors.primary, backgroundColor: "#f4f7ff" },
+  rowIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#eef2ff", alignItems: "center", justifyContent: "center" },
+  rowName: { color: colors.text, fontSize: 14, fontWeight: "700" },
+  rowMeta: { color: colors.textSubtle, fontSize: 11, marginTop: 2 },
+  radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 1.5, borderColor: colors.border },
+  manageBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 10, paddingVertical: 12, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: "#fff" },
+  manageBtnText: { color: colors.primary, fontWeight: "700", fontSize: 13 },
 });
