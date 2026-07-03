@@ -743,30 +743,29 @@ function renderOutput(
           index={i + 1}
           tag={isEditing ? "Editing" : "Post"}
           onCopy={() => onCopy(full)}
+          rightAction={
+            <TouchableOpacity
+              testID={`edit-toggle-${i}`}
+              style={[styles.copyBtn, isEditing && { backgroundColor: colors.primary, borderColor: colors.primary }]}
+              onPress={() => {
+                if (!setEditingIdx || !setEditedContent) return;
+                setEditingIdx((prev: Set<number>) => {
+                  const next = new Set(prev);
+                  if (next.has(i)) {
+                    next.delete(i);
+                  } else {
+                    next.add(i);
+                    setEditedContent((old: Record<number, string>) => ({ ...old, [i]: (typeof old[i] === "string" ? old[i] : autoFull) }));
+                  }
+                  return next;
+                });
+              }}
+              hitSlop={6}
+            >
+              <Ionicons name={isEditing ? "checkmark" : "create-outline"} size={16} color={isEditing ? "#fff" : colors.text} />
+            </TouchableOpacity>
+          }
         >
-          {/* Edit / Done toggle — sits next to the Copy button */}
-          <TouchableOpacity
-            testID={`edit-toggle-${i}`}
-            style={styles.editBtn}
-            onPress={() => {
-              if (!setEditingIdx || !setEditedContent) return;
-              setEditingIdx((prev: Set<number>) => {
-                const next = new Set(prev);
-                if (next.has(i)) {
-                  next.delete(i);
-                } else {
-                  next.add(i);
-                  // Seed the editor with the current composed text if empty.
-                  setEditedContent((old: Record<number, string>) => ({ ...old, [i]: (typeof old[i] === "string" ? old[i] : autoFull) }));
-                }
-                return next;
-              });
-            }}
-            hitSlop={8}
-          >
-            <Ionicons name={isEditing ? "checkmark" : "create-outline"} size={16} color={colors.primary} />
-          </TouchableOpacity>
-
           {isEditing ? (
             <TextInput
               testID={`edit-input-${i}`}
