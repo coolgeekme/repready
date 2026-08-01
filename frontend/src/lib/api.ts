@@ -115,8 +115,16 @@ export const api = {
   socialAccounts: (platform: string) =>
     request<any>(`/social/${platform}/accounts`),
   socialAllAccounts: () => request<any>("/social/all-accounts"),
-  deleteSocialAccount: (platform: string, id: string) =>
-    request<any>(`/social/${platform}/accounts/${id}`, { method: "DELETE" }),
+  deleteSocialAccount: async (platform: string, id: string) => {
+    const res = await request<any>(`/social/${platform}/accounts/${id}`, { method: "DELETE" });
+    // Backend now returns 200 with `{deleted:false, error}` on upstream failure
+    // (instead of a 502 that edge proxies overlay with HTML). Surface as
+    // exception so existing callers show a friendly toast.
+    if (res && res.deleted === false) {
+      throw new Error(res.error || `Couldn't remove ${platform} account.`);
+    }
+    return res;
+  },
   linkAccountToCompany: (companyId: string, platform: string, connected_account_id: string | null) =>
     request<any>(`/companies/${companyId}/link-account`, {
       method: "POST",

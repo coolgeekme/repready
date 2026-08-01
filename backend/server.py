@@ -2006,8 +2006,11 @@ async def social_disconnect(platform: str, user_id: str = Depends(get_user_id)):
         )
         return {"platform": platform, "deleted": deleted}
     except Exception as e:
-        logger.error(f"Composio {platform} disconnect failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+        logger.error(f"Composio {platform} disconnect failed: {e!r}")
+        raise HTTPException(
+            status_code=502,
+            detail=_sanitize_upstream_error(e, platform, action="disconnect"),
+        )
 
 
 async def _execute_social_post(
@@ -2467,6 +2470,18 @@ async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id
 
 @api_router.delete("/social/{platform}/accounts/{conn_id}")
 async def delete_social_account(platform: str, conn_id: str, user_id: str = Depends(get_user_id)):
+    """Delete a connected social account.
+
+    Contract (same rationale as `social_connect`):
+      - Success → HTTP 200, `{deleted: True}`
+      - Upstream/provider failure → HTTP 200, `{deleted: False, error: "<safe text>"}`
+      - Not-found on provider (already gone) → treated as idempotent success.
+
+    We deliberately avoid returning HTTP 5xx here so that intermediate edge
+    proxies (Cloudflare / ingress) cannot overlay their own HTML error page in
+    place of our JSON body — a raw HTML toast is worse UX than a 200 with an
+    `error` string.
+    """
     import asyncio
     def _del():
         client = _composio_client()
@@ -2475,10 +2490,19 @@ async def delete_social_account(platform: str, conn_id: str, user_id: str = Depe
         await asyncio.to_thread(_del)
     except Exception as e:
         logger.warning(f"Delete connection {conn_id} failed: {e!r}")
-        raise HTTPException(
-            status_code=502,
-            detail=_sanitize_upstream_error(e, platform, action="remove account"),
-        )
+        low = str(e).lower()
+        # Idempotent: if the provider says the resource is already gone,
+        # still clear our local links and report success.
+        if "resource_not_found" in low or "not_found" in low or "notfound" in low or "404" in low:
+            await db.companies.update_many(
+                {"user_id": user_id, f"linked_accounts.{platform}": conn_id},
+                {"$unset": {f"linked_accounts.{platform}": ""}},
+            )
+            return {"deleted": True, "already_gone": True}
+        return {
+            "deleted": False,
+            "error": _sanitize_upstream_error(e, platform, action="remove account"),
+        }
     # Remove from any company that referenced this account
     await db.companies.update_many(
         {"user_id": user_id, f"linked_accounts.{platform}": conn_id},
