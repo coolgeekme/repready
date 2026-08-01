@@ -15,8 +15,6 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
-from email_connections import active_connection_id
-
 from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: F401
 import httpx
 
@@ -1587,13 +1585,53 @@ def _sanitize_upstream_error(raw: Any, platform: str, action: str = "connect") -
     return clean[:240]
 
 
+def _extract_conn_field(item: Any, name: str) -> Any:
+    """Read a field from a Composio connected-account record that may be
+    returned either as an SDK object (attribute access) or as a plain dict.
+
+    Returns None if the field is missing on both shapes.
+    """
+    v = getattr(item, name, None)
+    if v is None and isinstance(item, dict):
+        v = item.get(name)
+    return v
+
+
+def _is_active_connection(item: Any) -> bool:
+    """A connection counts as ACTIVE for status/listing purposes only when:
+      • It has a truthy `id` (rules out orphan/placeholder records).
+      • Its `status` is either missing/None (defensive — some SDK responses
+        omit it entirely for records returned under a `statuses=["ACTIVE"]`
+        filter) or is the string 'ACTIVE' case-insensitively.
+    INITIALIZING / EXPIRED / FAILED / DROPPED / REVOKED etc. all fail this
+    check even if Composio's server-side filter leaked them into the result.
+    """
+    cid = _extract_conn_field(item, "id")
+    if not cid:
+        return False
+    status = _extract_conn_field(item, "status")
+    if status is None:
+        return True
+    status = getattr(status, "value", status)
+    return str(status).upper() == "ACTIVE"
+
+
 @api_router.get("/social/{platform}/status")
 async def social_status(platform: str, user_id: str = Depends(get_user_id)):
+    """Report whether the user has an ACTIVE social connection.
+
+    A record only counts as `connected=True` when it has BOTH a truthy `id`
+    AND a status of `ACTIVE` (or missing/None). INITIALIZING, EXPIRED,
+    FAILED, DROPPED, REVOKED, or ID-less items must never flip this flag
+    even if Composio's `statuses=["ACTIVE"]` filter leaks them into the
+    result. This mirrors the tightening previously applied to the email
+    status endpoint.
+    """
     if platform not in SOCIAL_AUTH_CONFIGS:
         raise HTTPException(status_code=404, detail="Unknown platform")
     auth_config_id = SOCIAL_AUTH_CONFIGS[platform]
     if not auth_config_id:
-        return {"platform": platform, "connected": False, "configured": False}
+        return {"platform": platform, "connected": False, "configured": False, "connection_id": None}
 
     import asyncio
     def _list():
@@ -1606,16 +1644,26 @@ async def social_status(platform: str, user_id: str = Depends(get_user_id)):
     try:
         result = await asyncio.to_thread(_list)
         items = getattr(result, "items", None) or list(result or [])
-        connected = len(items) > 0
+        active_id = None
+        for it in items:
+            if _is_active_connection(it):
+                active_id = _extract_conn_field(it, "id")
+                break
         return {
             "platform": platform,
-            "connected": connected,
+            "connected": active_id is not None,
             "configured": True,
-            "connection_id": getattr(items[0], "id", None) if connected else None,
+            "connection_id": active_id,
         }
     except Exception as e:
         logger.warning(f"{platform} status check failed: {e}")
-        return {"platform": platform, "connected": False, "configured": True, "error": str(e)}
+        return {
+            "platform": platform,
+            "connected": False,
+            "configured": True,
+            "connection_id": None,
+            "error": _sanitize_upstream_error(e, platform, action="status"),
+        }
 
 
 @api_router.post("/social/{platform}/connect")
@@ -2153,11 +2201,50 @@ async def _execute_social_post(
 
 
 # ---------- Routes: Email (Gmail / Outlook via Composio) ----------
+
+# Gmail and Outlook both use their env-provided Composio Auth Config IDs.
+#
+# HISTORY / WHY DETERMINISTIC:
+#   A previous attempt used a dynamic "managed Gmail auth config discovery/
+#   creation" resolver. That approach is REMOVED because it returned a
+#   `ac_...` ID that was not visible in the Composio dashboard for this
+#   project, causing new OAuth attempts to route back to the old blocked
+#   customized config (`ac_PB3OpzQ4iyZ_`) instead of the intended one.
+#
+# Gmail MUST use the exact env value `GMAIL_AUTH_CONFIG_ID` (currently
+# `ac_jzb88KeLjC9g` — a real Composio-managed OAuth2 config with the 11
+# verified Composio default scopes and no custom scopes, so Google shows the
+# standard consent screen rather than "This app is blocked"). Outlook uses
+# `OUTLOOK_AUTH_CONFIG_ID`. No dynamic lookup, no auto-creation, no caching
+# beyond the env read at import time.
+
+
+def _resolve_email_auth_config_id(provider: str) -> str:
+    """Return the auth_config_id to use for a given email provider.
+
+    Both providers resolve strictly from `EMAIL_AUTH_CONFIGS`, which was
+    populated once at import from env vars. This is deliberately deterministic
+    — no fallback, no discovery — so that operators can verify exactly which
+    config ID is being used by inspecting `.env` alone.
+    """
+    cid = EMAIL_AUTH_CONFIGS.get(provider, "")
+    if not cid:
+        upper = provider.upper()
+        raise HTTPException(
+            status_code=503,
+            detail=f"{provider.capitalize()} email is not configured. Set {upper}_AUTH_CONFIG_ID.",
+        )
+    return cid
+
+
+def _email_provider_configured(provider: str) -> bool:
+    """Whether a given email provider has an auth_config_id set."""
+    return bool(EMAIL_AUTH_CONFIGS.get(provider, ""))
+
+
 def _require_email_config(provider: str) -> str:
-    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
-    if not auth_config_id:
-        raise HTTPException(status_code=503, detail=f"{provider.capitalize()} email is not configured. Set {provider.upper()}_AUTH_CONFIG_ID.")
-    return auth_config_id
+    # Backwards-compatible shim used by /send.
+    return _resolve_email_auth_config_id(provider)
 
 
 async def _get_email_address(provider: str, user_id: str) -> str:
@@ -2207,25 +2294,59 @@ async def _build_email_args(provider: str, to: str, subject: str, body: str, cc=
 
 @api_router.get("/email/{provider}/status")
 async def email_status(provider: str, user_id: str = Depends(get_user_id)):
-    if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
-    if not auth_config_id: return {"provider": provider, "connected": False, "configured": False}
+    """Report whether the user has an ACTIVE email connection for this provider.
+
+    A connection only counts as `connected=True` when:
+      • Composio returns at least one record for this (user, auth_config).
+      • That record has a non-empty ID.
+      • That record's status is ACTIVE (not INITIALIZING / EXPIRED / FAILED /
+        DROPPED / etc.).
+
+    This tightening prevents "half-connected" states (Gmail approvals that
+    never completed, dropped OAuth handshakes, etc.) from being reported as
+    connected — which used to happen when we counted every entry Composio
+    returned regardless of `.id` / `.status`.
+    """
+    if provider not in EMAIL_AUTH_CONFIGS:
+        raise HTTPException(status_code=404, detail="Unknown email provider")
+    if not _email_provider_configured(provider):
+        return {"provider": provider, "connected": False, "configured": False, "connection_id": None}
+    try:
+        auth_config_id = _resolve_email_auth_config_id(provider)
+    except HTTPException:
+        return {"provider": provider, "connected": False, "configured": False, "connection_id": None}
+
     import asyncio
-    def _list(): return _composio_client().connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"])
+    def _list():
+        return _composio_client().connected_accounts.list(
+            user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"]
+        )
     try:
         result = await asyncio.to_thread(_list)
         items = getattr(result, "items", None) or list(result or [])
-        connection_id = next((cid for cid in (active_connection_id(item) for item in items) if cid), None)
-        return {"provider": provider, "connected": bool(connection_id), "configured": True, "connection_id": connection_id}
+        active_id = next(
+            (_extract_conn_field(item, "id") for item in items if _is_active_connection(item)),
+            None,
+        )
+        return {
+            "provider": provider,
+            "connected": active_id is not None,
+            "configured": True,
+            "connection_id": active_id,
+        }
     except Exception as e:
         logger.warning(f"{provider} email status check failed: {e}")
-        return {"provider": provider, "connected": False, "configured": True, "error": str(e)}
+        return {"provider": provider, "connected": False, "configured": True, "error": _sanitize_upstream_error(e, provider, action="status")}
 
 
 @api_router.post("/email/{provider}/connect")
 async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
     if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = _require_email_config(provider)
+    # Gmail always uses the Composio-managed auth config (see
+    # `_resolve_email_auth_config_id`) — the customized `GMAIL_AUTH_CONFIG_ID`
+    # env var is intentionally NOT read here, because scopes beyond Composio's
+    # verified defaults trigger Google's "This app is blocked" page.
+    auth_config_id = _resolve_email_auth_config_id(provider)
     import asyncio
     def _link(): return _composio_client().connected_accounts.link(user_id=user_id, auth_config_id=auth_config_id, allow_multiple=True)
     try:
@@ -2233,8 +2354,8 @@ async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
     except Exception as e:
         msg = str(e)
         if "Multiple connected accounts" in msg or "already" in msg.lower(): return {"provider": provider, "redirect_url": None, "already_connected": True}
-        logger.error(f"Composio {provider} email connect failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+        logger.error(f"Composio {provider} email connect failed: {e!r}")
+        raise HTTPException(status_code=502, detail=_sanitize_upstream_error(e, provider, action="connect"))
     redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
     if not redirect_url: raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
     return {"provider": provider, "redirect_url": redirect_url}
@@ -2243,8 +2364,12 @@ async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
 @api_router.get("/email/{provider}/accounts")
 async def list_email_accounts(provider: str, user_id: str = Depends(get_user_id)):
     if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
-    if not auth_config_id: return {"provider": provider, "accounts": [], "configured": False}
+    if not _email_provider_configured(provider):
+        return {"provider": provider, "accounts": [], "configured": False}
+    try:
+        auth_config_id = _resolve_email_auth_config_id(provider)
+    except HTTPException:
+        return {"provider": provider, "accounts": [], "configured": False}
     import asyncio
     def _list(): return _composio_client().connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"])
     result = await asyncio.to_thread(_list)
@@ -2259,10 +2384,11 @@ async def list_email_accounts(provider: str, user_id: str = Depends(get_user_id)
         except Exception: pass
     accounts = []
     for it in items:
-        conn_id = active_connection_id(it)
-        status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
-        created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
-        if not conn_id: continue
+        if not _is_active_connection(it):
+            continue
+        conn_id = str(_extract_conn_field(it, "id"))
+        status = _extract_conn_field(it, "status")
+        created = _extract_conn_field(it, "created_at")
         accounts.append({"id": conn_id, "status": status, "created_at": created, "display_name": cached_email or f"\u2026{conn_id[-8:]}"})
     return {"provider": provider, "accounts": accounts, "configured": True}
 
@@ -2272,7 +2398,7 @@ async def delete_email_account(provider: str, conn_id: str, user_id: str = Depen
     import asyncio
     def _del(): return _composio_client().connected_accounts.delete(nanoid=conn_id)
     try: await asyncio.to_thread(_del)
-    except Exception as e: logger.warning(f"Delete email connection {conn_id} failed: {e}"); raise HTTPException(status_code=502, detail=str(e)[:200])
+    except Exception as e: logger.warning(f"Delete email connection {conn_id} failed: {e!r}"); raise HTTPException(status_code=502, detail=_sanitize_upstream_error(e, provider, action="remove account"))
     await db.users.update_one({"user_id": user_id}, {"$unset": {f"email_address_{provider}": ""}})
     return {"deleted": True}
 
@@ -2330,7 +2456,7 @@ async def email_send(provider: str, payload: EmailSendRequest, user_id: str = De
 @api_router.post("/email/{provider}/disconnect")
 async def email_disconnect(provider: str, user_id: str = Depends(get_user_id)):
     if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = _require_email_config(provider)
+    auth_config_id = _resolve_email_auth_config_id(provider)
     import asyncio
     def _delete_all():
         client = _composio_client()
@@ -2354,7 +2480,7 @@ async def _execute_email_send(user_id: str, provider: str, to: str, subject: str
     """Internal helper that the scheduler calls to send scheduled emails."""
     import asyncio
     if provider not in EMAIL_SEND_TOOLS: return {"provider": provider, "success": False, "error": "Unknown email provider"}
-    if not EMAIL_AUTH_CONFIGS.get(provider): return {"provider": provider, "success": False, "error": f"{provider} not configured"}
+    if not _email_provider_configured(provider): return {"provider": provider, "success": False, "error": f"{provider} not configured"}
     tool = EMAIL_SEND_TOOLS[provider]
     args = await _build_email_args(provider, to, subject, body, cc, bcc, is_html)
     def _exec(): return _composio_client().tools.execute(user_id=user_id, slug=tool["slug"], arguments=args, dangerously_skip_version_check=True)
@@ -2664,6 +2790,14 @@ async def debug_social_accounts_raw(user_id: str = Depends(get_user_id)):
 
 @api_router.get("/social/{platform}/accounts")
 async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id)):
+    """List a user's connected social accounts.
+
+    Filters out any record that is not truly ACTIVE (INITIALIZING, EXPIRED,
+    FAILED, DROPPED, REVOKED, or without a truthy `id`), mirroring the same
+    safeguard as `social_status`. Existing active accounts and posting
+    behaviour are unaffected — this only prevents half-connected/orphan
+    records from surfacing in the UI's account picker.
+    """
     if platform not in SOCIAL_AUTH_CONFIGS:
         raise HTTPException(status_code=404, detail="Unknown platform")
     auth_config_id = SOCIAL_AUTH_CONFIGS.get(platform, "")
@@ -2675,19 +2809,22 @@ async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id
         return client.connected_accounts.list(
             user_ids=[user_id],
             auth_config_ids=[auth_config_id],
+            statuses=["ACTIVE"],
         )
     result = await asyncio.to_thread(_list)
     items = getattr(result, "items", None) or list(result or [])
     accounts = []
     for it in items:
-        conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
-        status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
-        created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
-        if not conn_id:
+        # Enforce ACTIVE + truthy-ID safeguard uniformly for both dict and
+        # SDK-object response shapes.
+        if not _is_active_connection(it):
             continue
+        conn_id = _extract_conn_field(it, "id")
+        status = _extract_conn_field(it, "status")
+        created = _extract_conn_field(it, "created_at")
         # Best-effort display name fetch
         display_name = None
-        if platform == "linkedin" and status == "ACTIVE":
+        if platform == "linkedin":
             try:
                 def _info():
                     client = _composio_client()
@@ -2698,7 +2835,7 @@ async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id
                         connected_account_id=conn_id,
                         dangerously_skip_version_check=True,
                     )
-                info = await asyncio.to_thread(_info) if False else await asyncio.to_thread(_info)
+                info = await asyncio.to_thread(_info)
                 data = getattr(info, "data", None) or (info.get("data") if isinstance(info, dict) else None) or {}
                 if isinstance(data, dict):
                     display_name = data.get("name") or data.get("given_name") or data.get("localizedFirstName")
