@@ -98,9 +98,15 @@ export default function GenerateScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      // Reload the active company context whenever the screen regains focus.
+      // NOTE: social-account loading is handled by the effect keyed on
+      // `activeCompany?.id` below — a previous refactor removed the local
+      // `loadAccounts` helper, but a stale `loadAccounts()` call was left here
+      // and caused `ReferenceError: loadAccounts is not defined` on every
+      // render, taking down all six generator routes (1.0.9 / build 110
+      // TestFlight crash → ErrorBoundary). Do NOT re-add that call here.
       loadActiveCompany();
-      loadAccounts();
-    }, [loadActiveCompany, loadAccounts])
+    }, [loadActiveCompany])
   );
 
   // Check email connection status for send buttons
@@ -521,6 +527,13 @@ export default function GenerateScreen() {
               setImagePromptMap,
               scheduledIdx,
               meta.canPostLinkedIn ? (i: number) => setSchedulerIdx(i) : undefined,
+              // Email send hook: only wire up for generators that produce a subject+body
+              // (Cold Email, Re-Engagement). For everything else, pass undefined so the
+              // send-email affordance is skipped entirely.
+              (t === "cold-email" || t === "re-engagement")
+                ? (i: number) => { setEmailModalIdx(i); }
+                : undefined,
+              emailConnected,
               editedContent,
               editingIdx,
               setEditingIdx,
