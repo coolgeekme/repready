@@ -1527,6 +1527,45 @@ def _require_social_config(platform: str) -> str:
     return auth_config_id
 
 
+def _sanitize_upstream_error(raw: Any, platform: str, action: str = "connect") -> str:
+    """Convert an arbitrary upstream error (Composio SDK exception, HTTP body, etc.)
+    into a short, safe, user-facing sentence. Guarantees:
+      - No HTML tags in the output (regex-stripped).
+      - No Cloudflare/gateway boilerplate leaks through.
+      - Length capped so it fits in a toast.
+
+    This is used at every boundary where a provider error could reach the client
+    (e.g. `/social/{platform}/connect` failures) so the UI never has to defend
+    against raw HTML bodies.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return (f"Couldn't {action} {platform.capitalize()} right now. "
+                "Please try again in a moment.")
+    low = s.lower()
+    # HTML / gateway / cloudflare error page → generic friendly message.
+    html_signals = ("<!doctype", "<html", "<!--[if", "cloudflare", "bad gateway",
+                    "gateway time-out", "gateway timeout", "service unavailable",
+                    "502 bad gateway", "503 service", "504 gateway", "nginx")
+    if any(sig in low for sig in html_signals):
+        return (f"{platform.capitalize()} authorization service is temporarily "
+                "unreachable. Please try again in a minute.")
+    # Strip any embedded HTML tags and collapse whitespace.
+    clean = re.sub(r"<[^>]+>", " ", s)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        return (f"Couldn't {action} {platform.capitalize()} right now. "
+                "Please try again in a moment.")
+    # Known Composio auth-config problems → actionable message.
+    if "invalid auth_config" in clean.lower() or "auth_config_id" in clean.lower():
+        return (f"{platform.capitalize()} isn't set up correctly on our side. "
+                "Please contact support@coolgeek.me.")
+    if "unauthorized" in clean.lower() or "invalid api key" in clean.lower():
+        return (f"{platform.capitalize()} authorization service is temporarily "
+                "unavailable. Please try again shortly.")
+    return clean[:240]
+
+
 @api_router.get("/social/{platform}/status")
 async def social_status(platform: str, user_id: str = Depends(get_user_id)):
     if platform not in SOCIAL_AUTH_CONFIGS:
@@ -1560,15 +1599,23 @@ async def social_status(platform: str, user_id: str = Depends(get_user_id)):
 
 @api_router.post("/social/{platform}/connect")
 async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
-    """Start a fresh Composio OAuth flow. Always returns a `redirect_url` on success.
+    """Start a fresh Composio OAuth flow.
 
-    Historically this endpoint short-circuited to `{already_connected: true}` whenever
-    the Composio SDK raised any error containing "already" / "allow_multiple" /
-    "Multiple connected accounts" — that was misleading (the frontend would show
-    a "connected" toast without actually starting a new OAuth). Instead we now
-    always call `link(..., allow_multiple=True)` (which the SDK supports and permits
-    parallel connections) and let real errors bubble up as HTTP 502 so users see
-    an actionable message.
+    Contract:
+      - Success → HTTP 200, body: `{"platform", "redirect_url", "success": true}`
+      - Provider/upstream failure → HTTP 200, body:
+            `{"platform", "success": false, "error": "<short friendly text>"}`
+        We deliberately return 200 (not 502) so that intermediate edge proxies
+        cannot overlay their own HTML error page in place of our JSON body.
+      - Unknown platform → HTTP 404
+      - Platform not configured → HTTP 503
+
+    Rationale for the JSON-only error path: production users have hit transient
+    Composio/CDN outages where the upstream returned an HTML error page. When
+    that HTML was surfaced through an `HTTPException(detail=str(e))`, the
+    frontend toast displayed raw `<!DOCTYPE html>` markup. `_sanitize_upstream_error`
+    now guarantees the response body is plain text, and the 200-with-success-flag
+    envelope guarantees no proxy substitutes an HTML body.
     """
     if platform not in SOCIAL_AUTH_CONFIGS:
         raise HTTPException(status_code=404, detail="Unknown platform")
@@ -1585,17 +1632,24 @@ async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
     try:
         cr = await asyncio.to_thread(_link)
     except Exception as e:
-        logger.error(f"Composio {platform} connect failed: {e}")
-        # Return HTTP 502 with the actual provider message so the UI can display it.
-        raise HTTPException(
-            status_code=502,
-            detail=(f"Couldn't start {platform.capitalize()} authorization. "
-                    f"Please try again in a moment. ({str(e)[:200]})"),
-        )
+        # Log the FULL raw error server-side (for debugging), but never expose
+        # raw HTML / gateway bodies to the client.
+        logger.error(f"Composio {platform} connect failed for user={user_id}: {e!r}")
+        return {
+            "platform": platform,
+            "success": False,
+            "error": _sanitize_upstream_error(e, platform, action="connect"),
+        }
     redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
     if not redirect_url:
-        raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
-    return {"platform": platform, "redirect_url": redirect_url}
+        logger.error(f"Composio {platform} connect: no redirect URL in response for user={user_id}")
+        return {
+            "platform": platform,
+            "success": False,
+            "error": (f"{platform.capitalize()} authorization service didn't return a "
+                      "sign-in link. Please try again in a moment."),
+        }
+    return {"platform": platform, "success": True, "redirect_url": redirect_url}
 
 
 def _humanize_provider_error(raw: Any, platform: str) -> str:
@@ -2420,8 +2474,11 @@ async def delete_social_account(platform: str, conn_id: str, user_id: str = Depe
     try:
         await asyncio.to_thread(_del)
     except Exception as e:
-        logger.warning(f"Delete connection {conn_id} failed: {e}")
-        raise HTTPException(status_code=502, detail=str(e)[:200])
+        logger.warning(f"Delete connection {conn_id} failed: {e!r}")
+        raise HTTPException(
+            status_code=502,
+            detail=_sanitize_upstream_error(e, platform, action="remove account"),
+        )
     # Remove from any company that referenced this account
     await db.companies.update_many(
         {"user_id": user_id, f"linked_accounts.{platform}": conn_id},

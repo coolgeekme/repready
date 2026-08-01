@@ -74,12 +74,32 @@ export default function CompanySocialsSection({ companyId, companyName, linkedAc
         toast(`Couldn't start ${platform} authorization. Please try again.`);
       }
     } catch (e: any) {
-      const raw = e?.message || "";
-      // 503 = auth config missing on backend; 502 = Composio provider error.
-      // Show the actual reason so the user (or support) has something actionable.
+      const raw = (e?.message || "").toString();
+      // 503 = auth config missing on backend; 502 = legacy Composio provider error path.
+      // Show the actual reason so the user (or support) has something actionable —
+      // but never let raw HTML (an old cached response or an ingress overlay)
+      // reach the toast. If we see HTML markers, replace with a generic message.
+      const low = raw.toLowerCase();
+      const looksLikeHtml =
+        low.includes("<!doctype") ||
+        low.includes("<html") ||
+        low.includes("<!--[if") ||
+        low.includes("cloudflare") ||
+        low.includes("bad gateway");
       let msg = `Couldn't connect ${platform}.`;
-      if (raw.includes("503")) msg = `${platform} isn't configured yet. Contact support@coolgeek.me.`;
-      else if (raw) msg = raw.replace(/^\d+:\s*/, "").slice(0, 240);
+      if (raw.includes("503")) {
+        msg = `${platform} isn't configured yet. Contact support@coolgeek.me.`;
+      } else if (looksLikeHtml) {
+        msg = `${platform} authorization service is temporarily unreachable. Please try again in a minute.`;
+      } else if (raw) {
+        // Strip leading "<status>: " if present, strip any embedded HTML tags, cap length.
+        msg = raw
+          .replace(/^\d+:\s*/, "")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240) || msg;
+      }
       toast(msg);
     } finally {
       setConnecting(null);

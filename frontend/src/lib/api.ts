@@ -11,6 +11,42 @@ async function authHeaders(): Promise<Record<string, string>> {
   };
 }
 
+/** Convert an arbitrary error response body into a safe, plain-text message.
+ *  - Never lets raw HTML (e.g. a Cloudflare/nginx error page overlaid by an
+ *    edge proxy) propagate into UI toasts.
+ *  - Extracts `detail` from FastAPI JSON error bodies when present.
+ */
+function safeErrorText(status: number, rawText: string): string {
+  const text = (rawText || "").trim();
+  if (!text) return `Request failed (${status}). Please try again.`;
+  // HTML/gateway body → generic friendly message
+  const low = text.slice(0, 200).toLowerCase();
+  const isHtml =
+    low.startsWith("<!doctype") ||
+    low.startsWith("<html") ||
+    low.startsWith("<!--[if") ||
+    /<html[\s>]/.test(low) ||
+    low.includes("cloudflare") ||
+    low.includes("bad gateway") ||
+    low.includes("gateway time");
+  if (isHtml) {
+    return "The service is temporarily unreachable. Please try again in a minute.";
+  }
+  // Try to parse FastAPI-style {"detail": "..."} envelopes.
+  try {
+    const parsed = JSON.parse(text);
+    const d = parsed?.detail ?? parsed?.error ?? parsed?.message;
+    if (typeof d === "string" && d.trim()) {
+      // Strip any embedded HTML tags as defense-in-depth.
+      return d.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
+    }
+  } catch {
+    // not JSON — fall through
+  }
+  // Plain text — strip HTML tags defensively, trim & cap length.
+  return text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = await authHeaders();
   const res = await fetch(`${BASE}/api${path}`, {
@@ -19,7 +55,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
+    throw new Error(`${res.status}: ${safeErrorText(res.status, text)}`);
   }
   return res.json();
 }
@@ -63,8 +99,17 @@ export const api = {
   // Generic social (LinkedIn / Facebook / Instagram)
   socialStatus: (platform: string) =>
     request<any>(`/social/${platform}/status`),
-  socialConnect: (platform: string) =>
-    request<any>(`/social/${platform}/connect`, { method: "POST" }),
+  socialConnect: async (platform: string) => {
+    const res = await request<any>(`/social/${platform}/connect`, { method: "POST" });
+    // Backend now returns HTTP 200 with `{success:false, error}` on upstream
+    // Composio/CDN outages (instead of a 5xx that edge proxies can overlay
+    // with an HTML error page). Surface it as an exception so callers can
+    // show a friendly toast without ever risking raw HTML.
+    if (res && res.success === false) {
+      throw new Error(res.error || `Couldn't start ${platform} authorization.`);
+    }
+    return res;
+  },
   socialDisconnect: (platform: string) =>
     request<any>(`/social/${platform}/disconnect`, { method: "POST" }),
   socialAccounts: (platform: string) =>

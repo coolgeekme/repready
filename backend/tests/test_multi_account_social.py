@@ -148,13 +148,93 @@ def test_link_account_empty_string_clears(s):
 # ---------- Connect endpoint (allow_multiple) ----------
 def test_connect_linkedin_returns_redirect_or_already(s):
     r = s.post(f"{BASE_URL}/api/social/linkedin/connect", json={}, timeout=TIMEOUT)
-    # Either a redirect URL or already_connected, NOT a 500
-    assert r.status_code in (200, 502), r.text
-    if r.status_code == 200:
-        j = r.json()
-        assert j.get("platform") == "linkedin"
-        # Either redirect_url is set OR already_connected flag is set
+    # New contract: connect endpoint ALWAYS returns 200 (even on upstream
+    # provider failure it responds with `{success:false, error}`) so that
+    # intermediate edge proxies cannot overlay HTML error pages.
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get("platform") == "linkedin"
+    # Either success + redirect_url, or a friendly error message.
+    if j.get("success") is False:
+        assert isinstance(j.get("error"), str) and j["error"].strip()
+        # Body must NEVER contain raw HTML markers.
+        low = r.text.lower()
+        assert "<!doctype" not in low and "<html" not in low and "<!--[if" not in low
+    else:
         assert j.get("redirect_url") or j.get("already_connected")
+
+
+# ---------- Regression: HTML sanitization on upstream errors ----------
+def test_connect_html_error_is_sanitized(monkeypatch):
+    """If the Composio SDK raises an exception whose str() contains a raw HTML
+    error page (Cloudflare / gateway body), the endpoint must:
+      1) Still respond HTTP 200 (defense against ingress overlays)
+      2) Return `success: false` with a plain-text friendly error
+      3) Contain ZERO HTML markup in the response body
+    """
+    import importlib
+    server = importlib.import_module("server")
+
+    HTML_BODY = (
+        "<!DOCTYPE html>\n<!--[if lt IE 7]><html class=\"no-js ie6\" lang=\"en-US\">"
+        "<![endif]-->\n<title>Bad Gateway | Cloudflare</title>"
+        "<body>Bad gateway</body></html>"
+    )
+
+    class _FakeExc(Exception):
+        def __str__(self):
+            return HTML_BODY
+
+    def _boom(*args, **kwargs):
+        raise _FakeExc()
+
+    class _FakeClient:
+        class connected_accounts:  # noqa: N801 - mimic SDK shape
+            link = staticmethod(_boom)
+
+    monkeypatch.setattr(server, "_composio_client", lambda: _FakeClient())
+
+    from fastapi.testclient import TestClient
+    tc = TestClient(server.app)
+    r = tc.post(
+        "/api/social/linkedin/connect",
+        headers={"X-User-Id": "html-error-test-user"},
+    )
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["platform"] == "linkedin"
+    assert j["success"] is False
+    assert isinstance(j["error"], str) and j["error"].strip()
+    low = r.text.lower()
+    for marker in ("<!doctype", "<html", "<!--[if", "cloudflare", "<body", "</html>"):
+        assert marker not in low, f"HTML marker leaked into response: {marker!r} in {r.text!r}"
+
+
+def test_connect_success_returns_redirect_url_shape(monkeypatch):
+    """Happy-path contract: HTTP 200 + `{success:true, redirect_url:...}`."""
+    import importlib
+    server = importlib.import_module("server")
+
+    class _Result:
+        redirect_url = "https://connect.composio.dev/link/lk_TESTFAKE"
+
+    class _FakeClient:
+        class connected_accounts:  # noqa: N801
+            link = staticmethod(lambda *a, **kw: _Result())
+
+    monkeypatch.setattr(server, "_composio_client", lambda: _FakeClient())
+
+    from fastapi.testclient import TestClient
+    tc = TestClient(server.app)
+    r = tc.post(
+        "/api/social/facebook/connect",
+        headers={"X-User-Id": "happy-path-test-user"},
+    )
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["platform"] == "facebook"
+    assert j["success"] is True
+    assert j["redirect_url"] == "https://connect.composio.dev/link/lk_TESTFAKE"
 
 
 # ---------- Scheduler ----------

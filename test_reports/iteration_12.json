@@ -1,0 +1,57 @@
+{
+  "summary": "Backend-only verification of the iOS 1.0.7/build-108 'raw HTML in Connect toast' fix. All 3 target connect endpoints (LinkedIn/Facebook/Instagram) now return HTTP 200 with clean JSON envelopes (verified live against public URL). The two new regression tests plus the updated existing test all pass. However, the *same class of bug* still exists on DELETE /api/social/{platform}/accounts/{conn_id}: the app returns HTTPException(502) with a sanitized JSON detail, but the edge proxy (preview.emergentagent.com Cloudflare) overlays its own HTML 502 error page — reproducing the exact HTML-leak the connect fix was designed to prevent. This must be fixed for full parity with the connect endpoint.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "DELETE /api/social/{platform}/accounts/{conn_id}",
+        "issue": "Still returns HTTP 502 on upstream Composio failure (server.py:2478-2481). Edge proxy (Cloudflare/preview.emergentagent.com) substitutes its own '<!DOCTYPE html>... 502: Bad gateway' HTML page in place of the sanitized JSON body — same root cause as the original iOS bug. The app-level body IS clean JSON when hit on localhost:8001 directly, but the 5xx status triggers the edge overlay for public traffic. Fix: mirror the connect endpoint pattern — always return HTTP 200 with {success:false, error:<sanitized>} envelope, or use a non-5xx status. Reproduced end-to-end for all 3 platforms.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "DELETE /api/social/{platform}/accounts/{conn_id}",
+        "issue": "When Composio returns 'ConnectedAccount_ResourceNotFound' (404), the endpoint currently maps it to 502. Should return 404 for genuine not-found and 200/409 for benign cases so idempotent deletes don't cause edge overlays."
+      },
+      {
+        "endpoint": "N/A (server.py)",
+        "issue": "FastAPI @app.on_event('startup'|'shutdown') at server.py:2571 and 2577 emit DeprecationWarnings. Migrate to the lifespan handler pattern."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_multi_account_social.py (existing + 2 new regression tests, all pass)",
+    "/app/backend/tests/test_connect_html_sanitize_e2e.py (new — live end-to-end HTML-sanitization checks)",
+    "/app/test_reports/pytest/iteration_12_results.xml",
+    "/app/test_reports/pytest/iteration_12_multi.xml"
+  ],
+  "action_items": [
+    "Apply the same '200-only, JSON envelope' pattern used in social_connect to delete_social_account (server.py ~L2468). Replace 'raise HTTPException(status_code=502, detail=_sanitize_upstream_error(...))' with 'return {\"deleted\": False, \"platform\": platform, \"error\": _sanitize_upstream_error(...)}' (or return 200 with success:false). This prevents the Cloudflare/edge overlay from re-introducing the HTML-in-toast bug on account removal.",
+    "Update the frontend delete-account handler (CompanySocialsSection.tsx and/or api.ts) to consume the new {deleted:false, error} envelope and show error text via the existing safeErrorText / HTML-detection guard.",
+    "Consider mapping Composio 'ConnectedAccount_ResourceNotFound' to HTTP 404 (or treat as idempotent success) rather than 502 to avoid unnecessary edge overlays.",
+    "Migrate deprecated @app.on_event('startup'/'shutdown') to FastAPI lifespan handlers (server.py:2571,2577). Non-blocking."
+  ],
+  "critical_code_review_comments": [
+    "server.py:2478 — delete_social_account still raises HTTPException(502), which is the exact contract that caused the original iOS bug on connect. The fix must be applied symmetrically everywhere the client could observe a 5xx from a Composio call. Grep for other 'raise HTTPException(status_code=502' occurrences and evaluate each one.",
+    "_sanitize_upstream_error is well-designed (HTML-tag stripping + Cloudflare signal detection + length cap) but is only effective when the response body is what the client sees. Any 5xx status is subject to edge-proxy body substitution and defeats the sanitizer. Prefer 200 envelopes for all user-facing error surfaces exposed through the edge.",
+    "server.py is 2580 lines — exceeds the 700-line guideline. Consider splitting social/scheduler/company modules into separate routers."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_connect_html_sanitize_e2e.py (new)"
+  ],
+  "success_rate": {
+    "backend": "92% (23/25 e2e checks — 3 DELETE-endpoint HTML-leak failures across LI/FB/IG; all other checks pass including the 2 new regression tests, connect happy-path on all 3 platforms, status endpoint, and 401 auth guard)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "None; tests use a per-run random X-User-Id header.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The connect endpoint fix is verified end-to-end. Focus retest on: (1) DELETE /api/social/{platform}/accounts/<bogus> returning 200 with JSON envelope and no HTML markers via the public URL, (2) frontend delete-account UI showing a friendly toast (never HTML) after main agent applies the symmetric fix. Re-run /app/backend/tests/test_connect_html_sanitize_e2e.py — the three test_delete_bogus_account_no_html_and_not_500[*] cases must go green.",
+  "rca_of_issue": "Original bug: HTTPException(status_code=502, detail=str(e)) on connect leaked upstream HTML through the FastAPI error body, and the emergentagent.com edge (Cloudflare tunnel) additionally overlays an HTML 502 page whenever the origin returns any 5xx status. The connect fix addressed BOTH layers by (a) sanitizing the error string via _sanitize_upstream_error, and (b) always returning HTTP 200 so the edge cannot substitute an HTML body. The same second layer of defense is missing on delete_social_account, which still returns 502. Reproduction: `curl -X DELETE https://rep-daily-ai.preview.emergentagent.com/api/social/linkedin/accounts/does-not-exist -H 'X-User-Id: t1'` → body starts with '<!DOCTYPE html>... preview.emergentagent.com | 502: Bad gateway'. Verified the origin body (localhost:8001) is clean JSON, confirming the leak is edge-proxy overlay driven by the 5xx status."
+}
