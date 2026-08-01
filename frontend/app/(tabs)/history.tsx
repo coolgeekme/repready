@@ -49,6 +49,8 @@ const PLATFORM_META: Record<string, { icon: keyof typeof Ionicons.glyphMap; colo
   linkedin: { icon: "logo-linkedin", color: "#0A66C2", label: "LinkedIn" },
   facebook: { icon: "logo-facebook", color: "#1877F2", label: "Facebook" },
   instagram: { icon: "logo-instagram", color: "#E1306C", label: "Instagram" },
+  gmail: { icon: "mail", color: "#EA4335", label: "Emailed" },
+  outlook: { icon: "mail", color: "#0078D4", label: "Emailed" },
 };
 
 export default function History() {

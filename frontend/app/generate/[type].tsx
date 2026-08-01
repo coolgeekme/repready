@@ -10,6 +10,8 @@ import { colors, fonts, radii, spacing } from "@/src/theme";
 import SchedulerModal from "@/src/components/SchedulerModal";
 import AccountPicker, { AccountSummary, AccountsMap, SelectedAccounts } from "@/src/components/AccountPicker";
 
+type EmailProvider = "gmail" | "outlook";
+
 type GenType = "cold-email" | "objection" | "call-script" | "company-intel" | "re-engagement" | "linkedin-post";
 
 const META: Record<GenType, { title: string; subtitle: string; backendType: string; icon: keyof typeof Ionicons.glyphMap; canPostLinkedIn?: boolean }> = {
@@ -43,6 +45,16 @@ export default function GenerateScreen() {
   const [schedulerIdx, setSchedulerIdx] = useState<number | null>(null);
   const [scheduling, setScheduling] = useState(false);
   const [scheduledIdx, setScheduledIdx] = useState<Set<number>>(new Set());
+  // Email send state
+  const [emailModalIdx, setEmailModalIdx] = useState<number | null>(null);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailCc, setEmailCc] = useState("");
+  const [emailProvider, setEmailProvider] = useState<EmailProvider>("gmail");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailConnected, setEmailConnected] = useState<Record<EmailProvider, boolean>>({ gmail: false, outlook: false });
+  const [emailAccounts, setEmailAccounts] = useState<Record<EmailProvider, { id: string; display_name?: string }[]>>({ gmail: [], outlook: [] });
+  const [selectedEmailAccount, setSelectedEmailAccount] = useState<Record<EmailProvider, string | null>>({ gmail: null, outlook: null });
+  const [emailLoaded, setEmailLoaded] = useState(false);
   // Persistence: the id of the current history document. Set after `submit()` succeeds
   // OR when a screen is re-opened from Library via the `historyId` param.
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
@@ -87,7 +99,46 @@ export default function GenerateScreen() {
   useFocusEffect(
     useCallback(() => {
       loadActiveCompany();
-    }, [loadActiveCompany])
+      loadAccounts();
+    }, [loadActiveCompany, loadAccounts])
+  );
+
+  // Check email connection status for send buttons
+  const checkEmailStatus = useCallback(async () => {
+    try {
+      const [gmailRes, outlookRes] = await Promise.all([
+        api.emailAccounts("gmail"),
+        api.emailAccounts("outlook"),
+      ]);
+      const gmailAccts = (gmailRes?.accounts || []).filter(
+        (a: any) => a.status === "ACTIVE" || !a.status,
+      );
+      const outlookAccts = (outlookRes?.accounts || []).filter(
+        (a: any) => a.status === "ACTIVE" || !a.status,
+      );
+      setEmailConnected({
+        gmail: gmailAccts.length > 0,
+        outlook: outlookAccts.length > 0,
+      });
+      setEmailAccounts({
+        gmail: gmailAccts,
+        outlook: outlookAccts,
+      });
+      setSelectedEmailAccount({
+        gmail: gmailAccts[0]?.id || null,
+        outlook: outlookAccts[0]?.id || null,
+      });
+    } catch (e) {
+      // ignore
+    } finally {
+      setEmailLoaded(true);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      checkEmailStatus();
+    }, [checkEmailStatus])
   );
 
   useEffect(() => {
@@ -225,16 +276,45 @@ export default function GenerateScreen() {
       setTimeout(() => setToast(null), 2000);
     } catch (e: any) {
       const m = e?.message || "";
-      if (m.includes("409") || m.includes("No ") && m.includes("account is linked")) {
-        // Backend refused because no account is picked / linked for the active company.
-        setErr(`Choose a ${platform.charAt(0).toUpperCase() + platform.slice(1)} account to post from. Tap "Post as" above, or link one in Settings → Companies.`);
-      } else if (m.includes("ConnectedAccountNotFound") || m.includes("No connected account")) {
+      if (m.includes("ConnectedAccountNotFound") || m.includes("No connected account")) {
         setErr(`Connect ${platform} in Settings first.`);
       } else {
         setErr(`Couldn't post to ${platform}. ${m.slice(0, 200)}`);
       }
     } finally {
       setPosting(null);
+    }
+  };
+  const sendEmail = async () => {
+    if (emailModalIdx === null) return;
+    if (!emailTo.trim()) {
+      setErr("Please enter a recipient email address.");
+      return;
+    }
+    setEmailSending(true);
+    setErr(null);
+    try {
+      const variants = output?.variations || [];
+      const v = variants[emailModalIdx];
+      const subject = v?.subject || "";
+      const body = v?.body || "";
+      await api.emailSend(emailProvider, {
+        to: emailTo.trim(),
+        subject,
+        body,
+        cc: emailCc.trim() ? emailCc.split(",").map((s: string) => s.trim()).filter(Boolean) : undefined,
+        history_id: output?.id,
+        connected_account_id: selectedEmailAccount[emailProvider] || undefined,
+      });
+      setToast(`✓ Email sent via ${emailProvider === "gmail" ? "Gmail" : "Outlook"}`);
+      setTimeout(() => setToast(null), 2500);
+      setEmailModalIdx(null);
+      setEmailTo("");
+      setEmailCc("");
+    } catch (e: any) {
+      setErr(`Send failed: ${(e?.message || "").slice(0, 200)}`);
+    } finally {
+      setEmailSending(false);
     }
   };
 
@@ -555,6 +635,76 @@ export default function GenerateScreen() {
         </Pressable>
       </Modal>
 
+      {/* Email send modal */}
+      <Modal visible={emailModalIdx !== null} animationType="slide" transparent onRequestClose={() => setEmailModalIdx(null)}>
+        <View style={styles.overlay}>
+          <View style={styles.sheet}>
+            <View style={styles.handle} />
+            <View style={emailModalStyles.header}>
+              <Text style={emailModalStyles.title}>Send Email</Text>
+              <TouchableOpacity testID="email-modal-close" onPress={() => { setEmailModalIdx(null); setEmailTo(""); setEmailCc(""); }} hitSlop={8}>
+                <Ionicons name="close" size={24} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={emailModalStyles.subject}>
+              {output?.variations?.[emailModalIdx ?? 0]?.subject || ""}
+            </Text>
+            <Text style={emailModalStyles.sectionLabel}>Provider</Text>
+            <View style={emailModalStyles.providerRow}>
+              {(["gmail", "outlook"] as EmailProvider[]).map((p) => {
+                const connected = emailConnected[p];
+                const accts = emailAccounts[p] || [];
+                const selected = emailProvider === p;
+                return (
+                  <TouchableOpacity
+                    key={p} testID={`email-provider-${p}`}
+                    style={[emailModalStyles.providerChip, selected && emailModalStyles.providerChipActive, !connected && emailModalStyles.providerDisabled]}
+                    onPress={() => connected && setEmailProvider(p)} disabled={!connected} activeOpacity={0.8}
+                  >
+                    <Ionicons name={p === "gmail" ? "logo-google" : "logo-microsoft"} size={16} color={selected && connected ? "#fff" : p === "gmail" ? "#EA4335" : "#0078D4"} />
+                    <Text style={[emailModalStyles.providerText, selected && connected && { color: "#fff" }]}>{p === "gmail" ? "Gmail" : "Outlook"}</Text>
+                    {!connected && <Text style={emailModalStyles.notConnected}>not connected</Text>}
+                    {connected && accts.length > 1 && <Text style={[emailModalStyles.countBadge, selected && { color: "#fff" }]}>×{accts.length}</Text>}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {emailConnected[emailProvider] && (emailAccounts[emailProvider] || []).length > 1 && (
+              <>
+                <Text style={emailModalStyles.sectionLabel}>{emailProvider === "gmail" ? "Gmail" : "Outlook"} account</Text>
+                <ScrollView style={{ maxHeight: 120 }}>
+                  {(emailAccounts[emailProvider] || []).map((a) => (
+                    <TouchableOpacity key={a.id} testID={`email-account-${a.id}`}
+                      style={[emailModalStyles.accountRow, selectedEmailAccount[emailProvider] === a.id && emailModalStyles.accountRowActive]}
+                      onPress={() => setSelectedEmailAccount((s) => ({ ...s, [emailProvider]: a.id }))} activeOpacity={0.8}
+                    >
+                      <View style={[emailModalStyles.accountRadio, selectedEmailAccount[emailProvider] === a.id && emailModalStyles.accountRadioActive]}>
+                        {selectedEmailAccount[emailProvider] === a.id && <View style={emailModalStyles.accountRadioDot} />}
+                      </View>
+                      <Ionicons name={emailProvider === "gmail" ? "logo-google" : "logo-microsoft"} size={14} color={emailProvider === "gmail" ? "#EA4335" : "#0078D4"} />
+                      <Text style={emailModalStyles.accountName} numberOfLines={1}>{a.display_name || `…${a.id.slice(-8)}`}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </>
+            )}
+            <Text style={emailModalStyles.sectionLabel}>To</Text>
+            <TextInput testID="email-recipient" style={styles.input} value={emailTo} onChangeText={setEmailTo} placeholder="recipient@company.com" placeholderTextColor={colors.textSubtle} autoCapitalize="none" keyboardType="email-address" />
+            <Text style={emailModalStyles.sectionLabel}>CC (optional, comma separated)</Text>
+            <TextInput testID="email-cc" style={styles.input} value={emailCc} onChangeText={setEmailCc} placeholder="colleague@company.com" placeholderTextColor={colors.textSubtle} autoCapitalize="none" />
+            {err && <Text style={[styles.error, { marginTop: 8 }]}>{err}</Text>}
+            <View style={emailModalStyles.footer}>
+              <TouchableOpacity testID="email-modal-cancel" style={[emailModalStyles.btn, emailModalStyles.btnGhost]} onPress={() => { setEmailModalIdx(null); setEmailTo(""); setEmailCc(""); }} disabled={emailSending}>
+                <Text style={emailModalStyles.btnGhostText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity testID="email-modal-send" style={[emailModalStyles.btn, emailModalStyles.btnPrimary, (emailSending || !emailTo.trim()) && { opacity: 0.6 }]} onPress={sendEmail} disabled={emailSending || !emailTo.trim()}>
+                {emailSending ? <ActivityIndicator color="#fff" /> : (<View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}><Ionicons name="send" size={16} color="#fff" /><Text style={emailModalStyles.btnPrimaryText}>Send</Text></View>)}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {toast && (
         <View testID="gen-toast" style={[styles.toast, { bottom: insets.bottom + 80 }]}>
           <Text style={styles.toastText}>{toast}</Text>
@@ -615,6 +765,8 @@ function renderOutput(
   setImagePromptMap?: (fn: any) => void,
   scheduledIdx?: Set<number>,
   onSchedule?: (idx: number) => void,
+  onEmailSend?: (idx: number) => void,
+  emailConnected?: Record<EmailProvider, boolean>,
   editedContent?: Record<number, string>,
   editingIdx?: Set<number>,
   setEditingIdx?: (fn: any) => void,
@@ -626,6 +778,9 @@ function renderOutput(
         <Text style={styles.subjectLabel}>Subject</Text>
         <Text style={styles.subject}>{v.subject}</Text>
         <Text style={styles.body}>{v.body}</Text>
+        {onEmailSend && emailConnected && (
+          <EmailSendBar index={i} emailConnected={emailConnected} onSend={() => onEmailSend(i)} />
+        )}
       </ResultCard>
     ));
   }
@@ -635,6 +790,9 @@ function renderOutput(
         <Text style={styles.subjectLabel}>Subject</Text>
         <Text style={styles.subject}>{v.subject}</Text>
         <Text style={styles.body}>{v.body}</Text>
+        {onEmailSend && emailConnected && (
+          <EmailSendBar index={i} emailConnected={emailConnected} onSend={() => onEmailSend(i)} />
+        )}
       </ResultCard>
     ));
   }
@@ -887,6 +1045,54 @@ function ResultCard({ index, tag, children, onCopy, rightAction }: { index: numb
   );
 }
 
+function EmailSendBar({ index, emailConnected, onSend }: { index: number; emailConnected: Record<EmailProvider, boolean>; onSend: () => void }) {
+  const anyConnected = emailConnected.gmail || emailConnected.outlook;
+  if (!anyConnected) return null;
+  return (
+    <TouchableOpacity testID={`email-send-btn-${index}`} style={emailBarStyles.bar} onPress={onSend} activeOpacity={0.85}>
+      <Ionicons name="mail-outline" size={16} color={colors.primary} />
+      <Text style={emailBarStyles.text}>Send via Email</Text>
+      <View style={{ flexDirection: "row", gap: 4 }}>
+        {emailConnected.gmail && <View style={[emailBarStyles.providerBadge, { backgroundColor: "#EA4335" }]}><Text style={emailBarStyles.badgeText}>Gmail</Text></View>}
+        {emailConnected.outlook && <View style={[emailBarStyles.providerBadge, { backgroundColor: "#0078D4" }]}><Text style={emailBarStyles.badgeText}>Outlook</Text></View>}
+      </View>
+      <Ionicons name="chevron-forward" size={14} color={colors.textSubtle} />
+    </TouchableOpacity>
+  );
+}
+
+const emailBarStyles = StyleSheet.create({
+  bar: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10, paddingVertical: 10, paddingHorizontal: 12, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.primary, borderStyle: "dashed", backgroundColor: "#EEF2FF" },
+  text: { color: colors.primary, fontWeight: "700", fontSize: 13, flex: 1 },
+  providerBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  badgeText: { color: "#fff", fontSize: 10, fontWeight: "800" },
+});
+
+const emailModalStyles = StyleSheet.create({
+  header: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 12 },
+  title: { color: colors.text, fontSize: 18, fontWeight: "800", flex: 1 },
+  subject: { color: colors.textMuted, fontSize: 13, fontStyle: "italic", marginBottom: 12, lineHeight: 18 },
+  sectionLabel: { color: colors.textSubtle, fontSize: 10, fontWeight: "800", letterSpacing: 1.5, textTransform: "uppercase", marginTop: 10, marginBottom: 6 },
+  providerRow: { flexDirection: "row", gap: 8 },
+  providerChip: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 10, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, borderRadius: radii.sm, backgroundColor: "#fff" },
+  providerChipActive: { borderColor: colors.primary, backgroundColor: colors.primary },
+  providerDisabled: { opacity: 0.45 },
+  providerText: { fontWeight: "700", fontSize: 13, color: colors.text },
+  notConnected: { color: colors.error, fontSize: 10, fontWeight: "700" },
+  countBadge: { fontSize: 11, fontWeight: "800", marginLeft: 2, color: colors.text },
+  accountRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 4 },
+  accountRowActive: { backgroundColor: colors.surface, borderRadius: radii.sm },
+  accountRadio: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  accountRadioActive: { borderColor: colors.primary },
+  accountRadioDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary },
+  accountName: { color: colors.text, fontWeight: "600", fontSize: 13, flex: 1 },
+  footer: { flexDirection: "row", gap: 8, marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.border },
+  btn: { paddingHorizontal: 14, paddingVertical: 12, borderRadius: radii.sm, alignItems: "center", justifyContent: "center" },
+  btnGhost: { borderWidth: 1, borderColor: colors.border, backgroundColor: "transparent", minWidth: 88 },
+  btnGhostText: { color: colors.text, fontWeight: "700" },
+  btnPrimary: { flex: 1, backgroundColor: colors.primary },
+  btnPrimaryText: { color: "#fff", fontWeight: "800", fontSize: 14 },
+});
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   headerBar: { flexDirection: "row", alignItems: "center", gap: 10, padding: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border },
@@ -896,6 +1102,9 @@ const styles = StyleSheet.create({
   overline: { color: colors.textSubtle, fontSize: 10, fontWeight: "700", letterSpacing: 2, textTransform: "uppercase" },
   subtitle: { color: colors.textMuted, fontSize: 14, marginTop: 6, marginBottom: spacing.md },
   scroll: { padding: spacing.lg },
+  overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: spacing.md, paddingTop: 8, paddingBottom: 16, maxHeight: "92%" },
+  handle: { width: 40, height: 4, backgroundColor: colors.border, borderRadius: 2, alignSelf: "center", marginBottom: 12 },
 
   field: { gap: 6, marginBottom: spacing.md },
   label: { fontSize: 12, fontWeight: "700", color: colors.textMuted, textTransform: "uppercase", letterSpacing: 1.4 },

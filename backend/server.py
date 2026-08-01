@@ -34,6 +34,12 @@ SOCIAL_AUTH_CONFIGS: Dict[str, str] = {
     "instagram": os.environ.get("INSTAGRAM_AUTH_CONFIG_ID", "").strip(),
 }
 LINKEDIN_AUTH_CONFIG_ID = SOCIAL_AUTH_CONFIGS["linkedin"]
+
+EMAIL_AUTH_CONFIGS: Dict[str, str] = {
+    "gmail": os.environ.get("GMAIL_AUTH_CONFIG_ID", "").strip(),
+    "outlook": os.environ.get("OUTLOOK_AUTH_CONFIG_ID", "").strip(),
+}
+
 CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
 
 app = FastAPI(title="RepReady API")
@@ -143,6 +149,10 @@ class ScheduledPostIn(BaseModel):
     # Per-platform account picker override — mirrors social_post payload:
     #   {"linkedin": "<connection_id>", "facebook": "<page_id>", "instagram": "<connection_id>"}
     selected_accounts: Optional[Dict[str, str]] = None
+    email_to: Optional[str] = None
+    email_subject: Optional[str] = None
+    email_cc: Optional[List[str]] = None
+    email_bcc: Optional[List[str]] = None
 
 
 class GenerateRequest(BaseModel):
@@ -1046,6 +1056,11 @@ SOCIAL_POST_TOOLS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+EMAIL_SEND_TOOLS: Dict[str, Dict[str, Any]] = {
+    "gmail": {"slug": "GMAIL_SEND_EMAIL", "toolkit": "GMAIL"},
+    "outlook": {"slug": "OUTLOOK_SEND_EMAIL", "toolkit": "OUTLOOK"},
+}
+
 
 def _extract_first(d: Any, keys: List[str]) -> Optional[Any]:
     """Walk a Composio response and return the first non-empty value found under one of `keys`."""
@@ -1487,6 +1502,10 @@ async def schedule_post(payload: ScheduledPostIn, user_id: str = Depends(get_use
         "image_mime": payload.image_mime,
         "history_id": payload.history_id,
         "selected_accounts": payload.selected_accounts or {},
+        "email_to": payload.email_to,
+        "email_subject": payload.email_subject,
+        "email_cc": payload.email_cc,
+        "email_bcc": payload.email_bcc,
         "scheduled_for": sched_dt.isoformat(),
         "status": "scheduled",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2131,6 +2150,218 @@ async def _execute_social_post(
     return {"platform": platform, "success": False, "error": f"{platform} posting not supported"}
 
 
+# ---------- Routes: Email (Gmail / Outlook via Composio) ----------
+def _require_email_config(provider: str) -> str:
+    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
+    if not auth_config_id:
+        raise HTTPException(status_code=503, detail=f"{provider.capitalize()} email is not configured. Set {provider.upper()}_AUTH_CONFIG_ID.")
+    return auth_config_id
+
+
+async def _get_email_address(provider: str, user_id: str) -> str:
+    """Fetch the authenticated email address for caching and from-address."""
+    profile = await _get_profile(user_id)
+    cache_key = f"email_address_{provider}"
+    cached = profile.get(cache_key)
+    if cached:
+        return cached
+    import asyncio
+    if provider == "gmail":
+        def _call():
+            client = _composio_client()
+            return client.tools.execute(user_id=user_id, slug="GMAIL_GET_PROFILE", arguments={"user_id": "me"}, dangerously_skip_version_check=True)
+    elif provider == "outlook":
+        def _call():
+            client = _composio_client()
+            return client.tools.execute(user_id=user_id, slug="OUTLOOK_GET_PROFILE", arguments={"user_id": "me"}, dangerously_skip_version_check=True)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown email provider: {provider}")
+    try:
+        result = await asyncio.to_thread(_call)
+        data = getattr(result, "data", None) or (result.get("data") if isinstance(result, dict) else None) or {}
+        if isinstance(data, dict):
+            email = data.get("emailAddress") or data.get("mail") or data.get("userPrincipalName")
+            if email:
+                await db.users.update_one({"user_id": user_id}, {"$set": {cache_key: email, "user_id": user_id}}, upsert=True)
+                return email
+    except Exception as e:
+        logger.warning(f"Could not fetch {provider} email address: {e}")
+    raise HTTPException(status_code=502, detail=f"Could not retrieve {provider} email address. Reconnect.")
+
+
+async def _build_email_args(provider: str, to: str, subject: str, body: str, cc=None, bcc=None, is_html: bool = False):
+    if provider == "gmail":
+        args = {"recipient_email": to, "subject": subject, "body": body, "is_html": is_html}
+        if cc: args["cc"] = cc
+        if bcc: args["bcc"] = bcc
+        return args
+    elif provider == "outlook":
+        args = {"to": to, "subject": subject, "body": body, "is_html": is_html}
+        if cc: args["cc_emails"] = cc
+        if bcc: args["bcc_emails"] = bcc
+        return args
+    raise HTTPException(status_code=400, detail=f"Unknown email provider: {provider}")
+
+
+@api_router.get("/email/{provider}/status")
+async def email_status(provider: str, user_id: str = Depends(get_user_id)):
+    if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
+    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
+    if not auth_config_id: return {"provider": provider, "connected": False, "configured": False}
+    import asyncio
+    def _list(): return _composio_client().connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"])
+    try:
+        result = await asyncio.to_thread(_list)
+        items = getattr(result, "items", None) or list(result or [])
+        connected = len(items) > 0
+        return {"provider": provider, "connected": connected, "configured": True, "connection_id": getattr(items[0], "id", None) if connected else None}
+    except Exception as e:
+        logger.warning(f"{provider} email status check failed: {e}")
+        return {"provider": provider, "connected": False, "configured": True, "error": str(e)}
+
+
+@api_router.post("/email/{provider}/connect")
+async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
+    if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
+    auth_config_id = _require_email_config(provider)
+    import asyncio
+    def _link(): return _composio_client().connected_accounts.link(user_id=user_id, auth_config_id=auth_config_id, allow_multiple=True)
+    try:
+        cr = await asyncio.to_thread(_link)
+    except Exception as e:
+        msg = str(e)
+        if "Multiple connected accounts" in msg or "already" in msg.lower(): return {"provider": provider, "redirect_url": None, "already_connected": True}
+        logger.error(f"Composio {provider} email connect failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+    redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
+    if not redirect_url: raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
+    return {"provider": provider, "redirect_url": redirect_url}
+
+
+@api_router.get("/email/{provider}/accounts")
+async def list_email_accounts(provider: str, user_id: str = Depends(get_user_id)):
+    if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
+    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
+    if not auth_config_id: return {"provider": provider, "accounts": [], "configured": False}
+    import asyncio
+    def _list(): return _composio_client().connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"])
+    result = await asyncio.to_thread(_list)
+    items = getattr(result, "items", None) or list(result or [])
+    profile = await _get_profile(user_id)
+    cached_email = profile.get(f"email_address_{provider}")
+    if not cached_email and items:
+        try:
+            await _get_email_address(provider, user_id)
+            profile = await _get_profile(user_id)
+            cached_email = profile.get(f"email_address_{provider}")
+        except Exception: pass
+    accounts = []
+    for it in items:
+        conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+        status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
+        created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
+        if not conn_id: continue
+        accounts.append({"id": conn_id, "status": status, "created_at": created, "display_name": cached_email or f"\u2026{conn_id[-8:]}"})
+    return {"provider": provider, "accounts": accounts, "configured": True}
+
+
+@api_router.delete("/email/{provider}/accounts/{conn_id}")
+async def delete_email_account(provider: str, conn_id: str, user_id: str = Depends(get_user_id)):
+    import asyncio
+    def _del(): return _composio_client().connected_accounts.delete(nanoid=conn_id)
+    try: await asyncio.to_thread(_del)
+    except Exception as e: logger.warning(f"Delete email connection {conn_id} failed: {e}"); raise HTTPException(status_code=502, detail=str(e)[:200])
+    await db.users.update_one({"user_id": user_id}, {"$unset": {f"email_address_{provider}": ""}})
+    return {"deleted": True}
+
+
+class EmailSendRequest(BaseModel):
+    to: str = Field(..., description="Recipient email address")
+    subject: str = Field(..., description="Email subject line")
+    body: str = Field(..., description="Email body (plain text or HTML)")
+    cc: Optional[List[str]] = None
+    bcc: Optional[List[str]] = None
+    is_html: bool = False
+    history_id: Optional[str] = None
+    connected_account_id: Optional[str] = None
+
+
+@api_router.post("/email/{provider}/send")
+async def email_send(provider: str, payload: EmailSendRequest, user_id: str = Depends(get_user_id)):
+    if provider not in EMAIL_SEND_TOOLS: raise HTTPException(status_code=404, detail="Unknown email provider")
+    _require_email_config(provider)
+    if not payload.to.strip(): raise HTTPException(status_code=400, detail="'to' address is required")
+    if not payload.subject.strip() and not payload.body.strip(): raise HTTPException(status_code=400, detail="subject or body is required")
+    tool = EMAIL_SEND_TOOLS[provider]
+    args = await _build_email_args(provider, payload.to.strip(), payload.subject, payload.body, payload.cc, payload.bcc, payload.is_html)
+    import asyncio
+    def _execute():
+        client = _composio_client()
+        kwargs = {"user_id": user_id, "slug": tool["slug"], "arguments": args, "dangerously_skip_version_check": True}
+        if payload.connected_account_id: kwargs["connected_account_id"] = payload.connected_account_id
+        return client.tools.execute(**kwargs)
+    try:
+        result = await asyncio.to_thread(_execute)
+        success = True
+        try:
+            if hasattr(result, "successful"): success = bool(result.successful)
+            elif isinstance(result, dict): success = bool(result.get("successful", True))
+        except Exception: pass
+        if not success:
+            err_detail = str(getattr(result, "error", result))[:400] if not isinstance(result, dict) else str(result.get("error", result))[:400]
+            logger.error(f"Composio {provider} email send failed: {err_detail}")
+            raise HTTPException(status_code=502, detail=err_detail[:300])
+        msg_id = None
+        try:
+            data = getattr(result, "data", None) or (result.get("data") if isinstance(result, dict) else None) or {}
+            if isinstance(data, dict): msg_id = data.get("id") or (data.get("response_data") or {}).get("id")
+        except Exception: pass
+        if payload.history_id:
+            posted_entry = {"platform": provider, "posted_at": datetime.now(timezone.utc).isoformat()}
+            if msg_id: posted_entry["message_id"] = msg_id
+            await db.history.update_one({"id": payload.history_id, "user_id": user_id}, {"$addToSet": {"posted_to": posted_entry}})
+        return {"success": True, "provider": provider, "message_id": msg_id}
+    except HTTPException: raise
+    except Exception as e: logger.error(f"Composio {provider} email send failed: {e}"); raise HTTPException(status_code=502, detail=str(e)[:300])
+
+
+@api_router.post("/email/{provider}/disconnect")
+async def email_disconnect(provider: str, user_id: str = Depends(get_user_id)):
+    if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
+    auth_config_id = _require_email_config(provider)
+    import asyncio
+    def _delete_all():
+        client = _composio_client()
+        listing = client.connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id])
+        items = getattr(listing, "items", None) or list(listing or [])
+        count = 0
+        for item in items:
+            conn_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+            if not conn_id: continue
+            try: client.connected_accounts.delete(nanoid=conn_id); count += 1
+            except Exception as e: logger.warning(f"Failed to delete {provider} connection {conn_id}: {e}")
+        return count
+    try:
+        deleted = await asyncio.to_thread(_delete_all)
+        await db.users.update_one({"user_id": user_id}, {"$unset": {f"email_address_{provider}": ""}})
+        return {"provider": provider, "deleted": deleted}
+    except Exception as e: logger.error(f"Composio {provider} disconnect failed: {e}"); raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+
+
+async def _execute_email_send(user_id: str, provider: str, to: str, subject: str, body: str, cc, bcc, is_html: bool, history_id):
+    """Internal helper that the scheduler calls to send scheduled emails."""
+    import asyncio
+    if provider not in EMAIL_SEND_TOOLS: return {"provider": provider, "success": False, "error": "Unknown email provider"}
+    if not EMAIL_AUTH_CONFIGS.get(provider): return {"provider": provider, "success": False, "error": f"{provider} not configured"}
+    tool = EMAIL_SEND_TOOLS[provider]
+    args = await _build_email_args(provider, to, subject, body, cc, bcc, is_html)
+    def _exec(): return _composio_client().tools.execute(user_id=user_id, slug=tool["slug"], arguments=args, dangerously_skip_version_check=True)
+    try:
+        result = await asyncio.to_thread(_exec)
+        if history_id: await db.history.update_one({"id": history_id, "user_id": user_id}, {"$addToSet": {"posted_to": {"platform": provider, "posted_at": datetime.now(timezone.utc).isoformat()}}})
+        return {"provider": provider, "success": True}
+    except Exception as e: return {"provider": provider, "success": False, "error": str(e)[:300]}
+
 async def _scheduler_loop():
     """Background task that checks for due scheduled posts every 60s."""
     import asyncio
@@ -2143,13 +2374,25 @@ async def _scheduler_loop():
                 await db.scheduled_posts.update_one({"id": doc_id}, {"$set": {"status": "posting"}})
                 results = []
                 for platform in doc.get("platforms", []):
-                    r = await _execute_social_post(
-                        doc["user_id"], platform, doc.get("content", ""),
-                        doc.get("image_b64"), doc.get("image_mime"), doc.get("history_id"),
-                        selected_accounts=doc.get("selected_accounts") or {},
-                    )
+                    if platform in EMAIL_SEND_TOOLS:
+                        r = await _execute_email_send(
+                            doc["user_id"], platform,
+                            doc.get("email_to", ""),
+                            doc.get("email_subject", doc.get("content", "")),
+                            doc.get("content", ""),
+                            doc.get("email_cc"),
+                            doc.get("email_bcc"),
+                            False,
+                            doc.get("history_id"),
+                        )
+                    else:
+                        r = await _execute_social_post(
+                            doc["user_id"], platform, doc.get("content", ""),
+                            doc.get("image_b64"), doc.get("image_mime"), doc.get("history_id"),
+                            selected_accounts=doc.get("selected_accounts") or {},
+                        )
                     results.append(r)
-                final_status = "posted" if all(r["success"] for r in results) else "failed"
+                final_status = "posted" if all(r.get("success", False) for r in results) else "failed"
                 await db.scheduled_posts.update_one(
                     {"id": doc_id},
                     {"$set": {"status": final_status, "results": results, "posted_at": datetime.now(timezone.utc).isoformat()}, "$unset": {"image_b64": ""}},
