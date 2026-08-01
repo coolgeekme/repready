@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
+from email_connections import active_connection_id
+
 from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: F401
 import httpx
 
@@ -2213,8 +2215,8 @@ async def email_status(provider: str, user_id: str = Depends(get_user_id)):
     try:
         result = await asyncio.to_thread(_list)
         items = getattr(result, "items", None) or list(result or [])
-        connected = len(items) > 0
-        return {"provider": provider, "connected": connected, "configured": True, "connection_id": getattr(items[0], "id", None) if connected else None}
+        connection_id = next((cid for cid in (active_connection_id(item) for item in items) if cid), None)
+        return {"provider": provider, "connected": bool(connection_id), "configured": True, "connection_id": connection_id}
     except Exception as e:
         logger.warning(f"{provider} email status check failed: {e}")
         return {"provider": provider, "connected": False, "configured": True, "error": str(e)}
@@ -2257,7 +2259,7 @@ async def list_email_accounts(provider: str, user_id: str = Depends(get_user_id)
         except Exception: pass
     accounts = []
     for it in items:
-        conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+        conn_id = active_connection_id(it)
         status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
         created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
         if not conn_id: continue
