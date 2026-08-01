@@ -1585,13 +1585,52 @@ def _sanitize_upstream_error(raw: Any, platform: str, action: str = "connect") -
     return clean[:240]
 
 
+def _extract_conn_field(item: Any, name: str) -> Any:
+    """Read a field from a Composio connected-account record that may be
+    returned either as an SDK object (attribute access) or as a plain dict.
+
+    Returns None if the field is missing on both shapes.
+    """
+    v = getattr(item, name, None)
+    if v is None and isinstance(item, dict):
+        v = item.get(name)
+    return v
+
+
+def _is_active_connection(item: Any) -> bool:
+    """A connection counts as ACTIVE for status/listing purposes only when:
+      • It has a truthy `id` (rules out orphan/placeholder records).
+      • Its `status` is either missing/None (defensive — some SDK responses
+        omit it entirely for records returned under a `statuses=["ACTIVE"]`
+        filter) or is the string 'ACTIVE' case-insensitively.
+    INITIALIZING / EXPIRED / FAILED / DROPPED / REVOKED etc. all fail this
+    check even if Composio's server-side filter leaked them into the result.
+    """
+    cid = _extract_conn_field(item, "id")
+    if not cid:
+        return False
+    status = _extract_conn_field(item, "status")
+    if status is None:
+        return True
+    return str(status).upper() == "ACTIVE"
+
+
 @api_router.get("/social/{platform}/status")
 async def social_status(platform: str, user_id: str = Depends(get_user_id)):
+    """Report whether the user has an ACTIVE social connection.
+
+    A record only counts as `connected=True` when it has BOTH a truthy `id`
+    AND a status of `ACTIVE` (or missing/None). INITIALIZING, EXPIRED,
+    FAILED, DROPPED, REVOKED, or ID-less items must never flip this flag
+    even if Composio's `statuses=["ACTIVE"]` filter leaks them into the
+    result. This mirrors the tightening previously applied to the email
+    status endpoint.
+    """
     if platform not in SOCIAL_AUTH_CONFIGS:
         raise HTTPException(status_code=404, detail="Unknown platform")
     auth_config_id = SOCIAL_AUTH_CONFIGS[platform]
     if not auth_config_id:
-        return {"platform": platform, "connected": False, "configured": False}
+        return {"platform": platform, "connected": False, "configured": False, "connection_id": None}
 
     import asyncio
     def _list():
@@ -1604,16 +1643,26 @@ async def social_status(platform: str, user_id: str = Depends(get_user_id)):
     try:
         result = await asyncio.to_thread(_list)
         items = getattr(result, "items", None) or list(result or [])
-        connected = len(items) > 0
+        active_id = None
+        for it in items:
+            if _is_active_connection(it):
+                active_id = _extract_conn_field(it, "id")
+                break
         return {
             "platform": platform,
-            "connected": connected,
+            "connected": active_id is not None,
             "configured": True,
-            "connection_id": getattr(items[0], "id", None) if connected else None,
+            "connection_id": active_id,
         }
     except Exception as e:
         logger.warning(f"{platform} status check failed: {e}")
-        return {"platform": platform, "connected": False, "configured": True, "error": str(e)}
+        return {
+            "platform": platform,
+            "connected": False,
+            "configured": True,
+            "connection_id": None,
+            "error": _sanitize_upstream_error(e, platform, action="status"),
+        }
 
 
 @api_router.post("/social/{platform}/connect")
@@ -2746,6 +2795,14 @@ async def debug_social_accounts_raw(user_id: str = Depends(get_user_id)):
 
 @api_router.get("/social/{platform}/accounts")
 async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id)):
+    """List a user's connected social accounts.
+
+    Filters out any record that is not truly ACTIVE (INITIALIZING, EXPIRED,
+    FAILED, DROPPED, REVOKED, or without a truthy `id`), mirroring the same
+    safeguard as `social_status`. Existing active accounts and posting
+    behaviour are unaffected — this only prevents half-connected/orphan
+    records from surfacing in the UI's account picker.
+    """
     if platform not in SOCIAL_AUTH_CONFIGS:
         raise HTTPException(status_code=404, detail="Unknown platform")
     auth_config_id = SOCIAL_AUTH_CONFIGS.get(platform, "")
@@ -2757,19 +2814,22 @@ async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id
         return client.connected_accounts.list(
             user_ids=[user_id],
             auth_config_ids=[auth_config_id],
+            statuses=["ACTIVE"],
         )
     result = await asyncio.to_thread(_list)
     items = getattr(result, "items", None) or list(result or [])
     accounts = []
     for it in items:
-        conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
-        status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
-        created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
-        if not conn_id:
+        # Enforce ACTIVE + truthy-ID safeguard uniformly for both dict and
+        # SDK-object response shapes.
+        if not _is_active_connection(it):
             continue
+        conn_id = _extract_conn_field(it, "id")
+        status = _extract_conn_field(it, "status")
+        created = _extract_conn_field(it, "created_at")
         # Best-effort display name fetch
         display_name = None
-        if platform == "linkedin" and status == "ACTIVE":
+        if platform == "linkedin":
             try:
                 def _info():
                     client = _composio_client()
@@ -2780,7 +2840,7 @@ async def list_social_accounts(platform: str, user_id: str = Depends(get_user_id
                         connected_account_id=conn_id,
                         dangerously_skip_version_check=True,
                     )
-                info = await asyncio.to_thread(_info) if False else await asyncio.to_thread(_info)
+                info = await asyncio.to_thread(_info)
                 data = getattr(info, "data", None) or (info.get("data") if isinstance(info, dict) else None) or {}
                 if isinstance(data, dict):
                     display_name = data.get("name") or data.get("given_name") or data.get("localizedFirstName")
