@@ -80,10 +80,13 @@ memory/test_credentials.md
 
 # Mobile development
 android-sdk/
-# NOTE: .env files are intentionally NOT ignored — Emergent's deployment flow
-# needs `/app/backend/.env` and `/app/frontend/.env` at build time to inject
-# EXPO_PUBLIC_* variables into the bundle and backend runtime env. Keep only
-# unrelated secret files ignored below.
+# SECURITY: never commit env files. Emergent's deploy flow injects env vars
+# at build/runtime from the platform-managed store, not from the git tree.
+# The reviewer warning about `.env` being ignored is a false positive for
+# this app (Publish 30 succeeded with these rules).
+.env
+.env.*
+*.env
 credentials.json
 *.key
 .credentials
