@@ -2,7 +2,7 @@
   "expo": {
     "name": "SalesReady",
     "slug": "salesready",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "salesready",
@@ -11,7 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.coolgeek.salesready",
-      "buildNumber": "111",
+      "buildNumber": "112",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       },
@@ -59,7 +59,7 @@
     },
     "android": {
       "package": "com.coolgeek.salesready",
-      "versionCode": 111,
+      "versionCode": 112,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000"
