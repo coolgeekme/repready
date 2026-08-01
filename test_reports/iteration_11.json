@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 11 backend verification COMPLETE. All 15/15 pytest tests pass (100%) against local backend at http://localhost:8001 with LIVE Composio. Verified all 5 fixes: (1) POST /api/social/linkedin/connect always returns 200 with a fresh https redirect_url and never returns `already_connected` — a second call for the same X-User-Id yields a NEW redirect_url (allow_multiple=True works). Unknown platform → 404. (2) POST /api/social/{linkedin|facebook|instagram}/post with no active company and no override returns HTTP 409 whose detail contains 'No <Platform> account is linked'. (3) Explicit `connection_id` (LinkedIn) or `page_id` (Facebook) overrides bypass the 409 check and reach Composio, which returns 200 with {success:false, error:...} for fake ids. (4) `_linkedin_get_author_urn` is now scoped per connected_account_id — seeded `linkedin_author_urns={conn_A:urnA, conn_B:urnB}` on a user; calling with conn_A returns urnA, conn_B returns urnB, and the legacy singular `linkedin_author_urn` field is NOT read. Default bucket ('_default') correctly falls through to Composio (does not reuse any per-connection URN). (5) POST /api/social/linkedin/disconnect on a user with both legacy `linkedin_author_urn` and new `linkedin_author_urns` unsets BOTH fields (plus `linkedin_connection_id` and `linkedin_connected`). Regressions green: GET /api/social/all-accounts → 200 with expected shape; GET /api/legal/privacy → 200 text/html; PATCH /api/history/{id} with whitelisted field → 200 with updated doc and no `_id` leak. Version bumps confirmed in /app/frontend/app.json: expo.version=1.0.7, ios.buildNumber='108', android.versionCode=108.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_11.py",
+    "/app/test_reports/pytest/iteration_11_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py `social_connect` (L1561-1598): correctly removed the `already_connected` short-circuit; always calls `client.connected_accounts.link(..., allow_multiple=True)` and raises HTTP 502 with the underlying provider message on SDK exception. Response shape is `{platform, redirect_url}`.",
+    "server.py `social_post` (L1815-1832): active-company resolution correctly checks `chosen_conn_id` FIRST (payload.connection_id) and `fb_page_override` (payload.page_id) BEFORE calling `_get_active_company`; only falls back to `active_company.linked_accounts[platform]` when neither override is present. 409 raised with a clear actionable detail when nothing resolves. Facebook page_id override correctly bypasses the 409.",
+    "server.py `_linkedin_get_author_urn` (L1237-1285): cache key is `connected_account_id or '_default'`, stored under `users.<uid>.linkedin_author_urns.<cache_key>`. The legacy singular `linkedin_author_urn` field is never read. Persistence path uses `$set: {f'linkedin_author_urns.{cache_key}': ...}` which correctly upserts nested keys without clobbering sibling connections.",
+    "server.py `social_disconnect` (L1943): `unset_fields` for linkedin correctly includes BOTH the legacy `linkedin_author_urn` AND the new `linkedin_author_urns` map, plus `linkedin_connection_id` and `linkedin_connected`. Verified via seed + $unset that both fields are gone after disconnect.",
+    "server.py is now 2523 lines — still exceeds the 700-line guideline. Splitting into `routes/social.py`, `services/composio.py`, `helpers/social_parsers.py` remains recommended but not blocking.",
+    "Composio auth-config env vars and Firebase secrets were NOT modified (per request)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_11.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15)",
+    "frontend": "N/A (backend-only per request)"
+  },
+  "seed_data_creation": "Test module creates ephemeral users `it11-<uuid>`, `it11-cache-<uuid>`, `it11-cache-def-<uuid>` in the `users`, `companies`, `history` collections and cleans them up in fixture teardown / try-finally. No production/seeded data touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 11 backend fixes are fully green. Test file /app/backend/tests/test_iteration_11.py covers: connect fresh redirect (2× same user → 2 different URLs, no `already_connected`), unknown platform 404, 409-when-no-linked-account for LI/FB/IG, override-bypasses-409 for LI (connection_id) and FB (page_id), _linkedin_get_author_urn per-connection cache hits + default fallthrough, disconnect clears legacy+new caches, /social/all-accounts + /legal/privacy + PATCH /history/{id} regressions, and app.json version bump assertion (1.0.7 / 108 / 108). NOTE: The URN cache test imports `_linkedin_get_author_urn` from server.py directly — because Motor binds to an event loop, both awaits are wrapped in a single async coroutine and executed via one `asyncio.run()` call (splitting into two calls raises 'Event loop is closed'). Re-run with: `MONGO_URL=... DB_NAME=repready_db pytest backend/tests/test_iteration_11.py -v`."
+}

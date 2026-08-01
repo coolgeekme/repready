@@ -225,7 +225,10 @@ export default function GenerateScreen() {
       setTimeout(() => setToast(null), 2000);
     } catch (e: any) {
       const m = e?.message || "";
-      if (m.includes("ConnectedAccountNotFound") || m.includes("No connected account")) {
+      if (m.includes("409") || m.includes("No ") && m.includes("account is linked")) {
+        // Backend refused because no account is picked / linked for the active company.
+        setErr(`Choose a ${platform.charAt(0).toUpperCase() + platform.slice(1)} account to post from. Tap "Post as" above, or link one in Settings → Companies.`);
+      } else if (m.includes("ConnectedAccountNotFound") || m.includes("No connected account")) {
         setErr(`Connect ${platform} in Settings first.`);
       } else {
         setErr(`Couldn't post to ${platform}. ${m.slice(0, 200)}`);

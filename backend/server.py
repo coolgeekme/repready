@@ -1234,23 +1234,35 @@ async def _linkedin_upload_image(user_id: str, author_urn: str, image_b64: str, 
     return await asyncio.to_thread(_do_upload)
 
 
-async def _linkedin_get_author_urn(user_id: str) -> str:
-    """Return cached LinkedIn person URN or fetch via LINKEDIN_GET_MY_INFO."""
+async def _linkedin_get_author_urn(user_id: str, connected_account_id: Optional[str] = None) -> str:
+    """Return the LinkedIn person URN for a SPECIFIC connected account.
+
+    Each Composio LinkedIn connection maps to a distinct LinkedIn profile. Caching
+    a single `linkedin_author_urn` per user made us reuse the FIRST account's URN
+    when the user later tried posting from a different one — Meta/LinkedIn then
+    rejected the request because the token didn't match the URN. We now scope the
+    cache per `connected_account_id` (or a "_default" bucket when the caller
+    hasn't picked one).
+    """
+    cache_key = connected_account_id or "_default"
     profile = await _get_profile(user_id)
-    cached = profile.get("linkedin_author_urn")
-    if cached:
-        return cached
+    cached_map = profile.get("linkedin_author_urns") or {}
+    if isinstance(cached_map, dict) and cached_map.get(cache_key):
+        return cached_map[cache_key]
+
     import asyncio
     def _call():
         client = _composio_client()
-        return client.tools.execute(
-            user_id=user_id,
-            slug="LINKEDIN_GET_MY_INFO",
-            arguments={},
-            dangerously_skip_version_check=True,
-        )
+        kwargs: Dict[str, Any] = {
+            "user_id": user_id,
+            "slug": "LINKEDIN_GET_MY_INFO",
+            "arguments": {},
+            "dangerously_skip_version_check": True,
+        }
+        if connected_account_id:
+            kwargs["connected_account_id"] = connected_account_id
+        return client.tools.execute(**kwargs)
     result = await asyncio.to_thread(_call)
-    # Result shape: {data: {..., id: '...', sub: '...'}} or pydantic model
     data: Any = None
     try:
         if hasattr(result, "data"):
@@ -1259,16 +1271,15 @@ async def _linkedin_get_author_urn(user_id: str) -> str:
             data = result.get("data") or result
     except Exception:
         data = result
-    # Try multiple known keys for the person identifier
     person_id = None
     if isinstance(data, dict):
-        person_id = data.get("id") or data.get("sub") or data.get("response_data", {}).get("id")
+        person_id = data.get("id") or data.get("sub") or (data.get("response_data") or {}).get("id")
     if not person_id:
         raise HTTPException(status_code=502, detail="Could not retrieve LinkedIn profile ID. Reconnect LinkedIn.")
     author_urn = f"urn:li:person:{person_id}"
     await db.users.update_one(
         {"user_id": user_id},
-        {"$set": {"linkedin_author_urn": author_urn, "user_id": user_id}},
+        {"$set": {f"linkedin_author_urns.{cache_key}": author_urn, "user_id": user_id}},
         upsert=True,
     )
     return author_urn
@@ -1549,39 +1560,42 @@ async def social_status(platform: str, user_id: str = Depends(get_user_id)):
 
 @api_router.post("/social/{platform}/connect")
 async def social_connect(platform: str, user_id: str = Depends(get_user_id)):
+    """Start a fresh Composio OAuth flow. Always returns a `redirect_url` on success.
+
+    Historically this endpoint short-circuited to `{already_connected: true}` whenever
+    the Composio SDK raised any error containing "already" / "allow_multiple" /
+    "Multiple connected accounts" — that was misleading (the frontend would show
+    a "connected" toast without actually starting a new OAuth). Instead we now
+    always call `link(..., allow_multiple=True)` (which the SDK supports and permits
+    parallel connections) and let real errors bubble up as HTTP 502 so users see
+    an actionable message.
+    """
     if platform not in SOCIAL_AUTH_CONFIGS:
         raise HTTPException(status_code=404, detail="Unknown platform")
     auth_config_id = _require_social_config(platform)
 
     import asyncio
-    def _link(allow_multiple: bool = True):
+    def _link():
         client = _composio_client()
         return client.connected_accounts.link(
             user_id=user_id,
             auth_config_id=auth_config_id,
-            allow_multiple=allow_multiple,
+            allow_multiple=True,
         )
     try:
-        try:
-            cr = await asyncio.to_thread(_link, True)
-        except Exception as e:
-            msg = str(e)
-            if "Multiple connected accounts" in msg or "allow_multiple" in msg:
-                # User already has at least one connection — surface that
-                return {"platform": platform, "redirect_url": None, "already_connected": True}
-            raise
-        redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
-        if not redirect_url:
-            raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
-        return {"platform": platform, "redirect_url": redirect_url}
-    except HTTPException:
-        raise
+        cr = await asyncio.to_thread(_link)
     except Exception as e:
-        msg = str(e)
-        if "ComposioMultipleConnectedAccountsError" in msg or "already" in msg.lower():
-            return {"platform": platform, "redirect_url": None, "already_connected": True}
         logger.error(f"Composio {platform} connect failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+        # Return HTTP 502 with the actual provider message so the UI can display it.
+        raise HTTPException(
+            status_code=502,
+            detail=(f"Couldn't start {platform.capitalize()} authorization. "
+                    f"Please try again in a moment. ({str(e)[:200]})"),
+        )
+    redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
+    if not redirect_url:
+        raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
+    return {"platform": platform, "redirect_url": redirect_url}
 
 
 def _humanize_provider_error(raw: Any, platform: str) -> str:
@@ -1792,25 +1806,37 @@ async def social_post(platform: str, payload: Dict[str, Any], request: Request, 
     if tool["needs_image"] and not image_url and not image_b64:
         raise HTTPException(status_code=400, detail=f"{platform} requires an image")
 
-    # Pick the connected account. Explicit override wins; otherwise fall back to
-    # the active company's linked account. This drives the "Post as" picker UX (Option C).
+    # Resolve the connected account for this post:
+    #   1) Explicit picker override (`connection_id` / `page_id` in the payload) wins.
+    #   2) Otherwise MUST come from the active company's `linked_accounts[platform]`.
+    #   3) If neither exists we refuse the post with 409 so the UI can prompt the user
+    #      to pick an account in Settings — we never silently fall back to a random
+    #      Composio connection (which was the source of cross-account posting bugs).
     chosen_conn_id: Optional[str] = (payload.get("connection_id") or "").strip() or None
     fb_page_override: Optional[str] = (payload.get("page_id") or "").strip() or None
-    if not chosen_conn_id:
+    active_company = None
+    if not chosen_conn_id and not fb_page_override:
         try:
             active_company = await _get_active_company(user_id)
-            if active_company:
-                linked = active_company.get("linked_accounts") or {}
-                chosen_conn_id = linked.get(platform)
         except Exception:
-            pass
+            active_company = None
+        linked = (active_company or {}).get("linked_accounts") or {}
+        chosen_conn_id = (linked.get(platform) or "").strip() or None
 
-    # LinkedIn-specific: build args with optional image upload
+    if not chosen_conn_id and not (platform == "facebook" and fb_page_override):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"No {platform.capitalize()} account is linked to your active company. "
+                    f"Open Settings → Companies, connect a {platform.capitalize()} account, "
+                    f"and select it before posting."),
+        )
+
+    # LinkedIn-specific: build args with optional image upload. URN lookup now uses
+    # the SAME connected_account_id so we never reuse a different account's URN.
     if platform == "linkedin":
         try:
-            author_urn = await _linkedin_get_author_urn(user_id)
+            author_urn = await _linkedin_get_author_urn(user_id, connected_account_id=chosen_conn_id)
         except HTTPException as he:
-            # URN fetch may raise its own 502 — convert to clean success:false JSON
             return {"success": False, "platform": platform, "error": str(he.detail)[:280]}
         except Exception as e:
             logger.error(f"LinkedIn URN fetch failed: {e}")
@@ -1914,7 +1940,7 @@ async def social_disconnect(platform: str, user_id: str = Depends(get_user_id)):
         # Clear cached fields on our user record
         unset_fields: Dict[str, str] = {}
         if platform == "linkedin":
-            unset_fields = {"linkedin_connection_id": "", "linkedin_connected": "", "linkedin_author_urn": ""}
+            unset_fields = {"linkedin_connection_id": "", "linkedin_connected": "", "linkedin_author_urn": "", "linkedin_author_urns": ""}
         elif platform == "instagram":
             unset_fields = {"instagram_user_ids": ""}
         elif platform == "facebook":
@@ -1982,7 +2008,10 @@ async def _execute_social_post(
 
     if platform == "linkedin":
         try:
-            author_urn = await _linkedin_get_author_urn(user_id)
+            # Scheduled LinkedIn posts must also resolve the URN via the SAME
+            # connected account they'll post from — never reuse a cached URN
+            # tied to a different account.
+            author_urn = await _linkedin_get_author_urn(user_id, connected_account_id=chosen_conn_id)
         except Exception as e:
             return {"platform": platform, "success": False, "error": f"URN: {e}"}
         args = {"author": author_urn, "commentary": content}

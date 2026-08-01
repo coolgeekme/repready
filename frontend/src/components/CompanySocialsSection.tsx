@@ -64,16 +64,23 @@ export default function CompanySocialsSection({ companyId, companyName, linkedAc
     setConnecting(platform);
     try {
       const res = await api.socialConnect(platform);
-      if (res?.already_connected) {
-        toast(`${platform} already connected`);
-      } else if (res?.redirect_url) {
+      // Backend now always returns a fresh `redirect_url` on success. The old
+      // `already_connected` short-circuit was misleading — we removed it.
+      if (res?.redirect_url) {
         await WebBrowser.openBrowserAsync(res.redirect_url);
+        await refresh();
+        if (onChange) onChange();
+      } else {
+        toast(`Couldn't start ${platform} authorization. Please try again.`);
       }
-      await refresh();
-      if (onChange) onChange();
     } catch (e: any) {
-      const msg = (e?.message || "").includes("503") ? "not configured" : "connect failed";
-      toast(`${platform} ${msg}`);
+      const raw = e?.message || "";
+      // 503 = auth config missing on backend; 502 = Composio provider error.
+      // Show the actual reason so the user (or support) has something actionable.
+      let msg = `Couldn't connect ${platform}.`;
+      if (raw.includes("503")) msg = `${platform} isn't configured yet. Contact support@coolgeek.me.`;
+      else if (raw) msg = raw.replace(/^\d+:\s*/, "").slice(0, 240);
+      toast(msg);
     } finally {
       setConnecting(null);
     }
