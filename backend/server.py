@@ -2151,11 +2151,104 @@ async def _execute_social_post(
 
 
 # ---------- Routes: Email (Gmail / Outlook via Composio) ----------
+
+# --- Gmail: use Composio's built-in managed OAuth ---------------------------
+# Google shows "This app is blocked" when a Composio-managed OAuth client is
+# used with scopes beyond the verified defaults. The environment variable
+# `GMAIL_AUTH_CONFIG_ID` (ac_PB3OpzQ4iyZ_) is a CUSTOMIZED auth config with
+# explicit scopes and MUST NOT be forced for Gmail. Instead, we resolve (and
+# lazily create) the project's Composio-MANAGED Gmail auth config on the fly
+# and cache its ID at module scope. Outlook is unaffected and still uses
+# `OUTLOOK_AUTH_CONFIG_ID` from the environment.
+_MANAGED_GMAIL_AUTH_CONFIG_ID: Optional[str] = None
+
+
+def _get_managed_gmail_auth_config_id() -> str:
+    """Return the ID of this project's Composio-managed Gmail auth config.
+
+    Order of resolution (cached after first success):
+      1. Return the module-level cache if already resolved.
+      2. `auth_configs.list(toolkit_slug="gmail", is_composio_managed=True)` —
+         picks the first ACTIVE / ENABLED entry.
+      3. If none exist, `auth_configs.create("gmail", {"type": "use_composio_managed_auth"})`
+         to bootstrap one, and use its returned ID.
+    Any failure to resolve/create raises an HTTPException 503 with a friendly
+    message so `_sanitize_upstream_error`-style handling upstream still applies.
+    """
+    global _MANAGED_GMAIL_AUTH_CONFIG_ID
+    if _MANAGED_GMAIL_AUTH_CONFIG_ID:
+        return _MANAGED_GMAIL_AUTH_CONFIG_ID
+    client = _composio_client()
+    # 1) Discover an existing managed Gmail auth config.
+    try:
+        listing = client.auth_configs.list(toolkit_slug="gmail", is_composio_managed=True)
+        items = getattr(listing, "items", None) or []
+        for it in items:
+            cid = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+            managed = getattr(it, "is_composio_managed", None)
+            if managed is None and isinstance(it, dict):
+                managed = it.get("is_composio_managed")
+            if cid and bool(managed):
+                _MANAGED_GMAIL_AUTH_CONFIG_ID = cid
+                logger.info(f"Using existing Composio-managed Gmail auth config: {cid}")
+                return cid
+    except Exception as e:
+        logger.warning(f"auth_configs.list(gmail, managed) failed: {e!r}")
+    # 2) None exists — create one with no custom scopes so Google shows the
+    #    verified consent screen (not the "app blocked" error).
+    try:
+        created = client.auth_configs.create("gmail", {"type": "use_composio_managed_auth"})
+        cid = getattr(created, "id", None) or (created.get("id") if isinstance(created, dict) else None)
+        if not cid:
+            raise RuntimeError("auth_configs.create returned no id")
+        _MANAGED_GMAIL_AUTH_CONFIG_ID = cid
+        logger.info(f"Created new Composio-managed Gmail auth config: {cid}")
+        return cid
+    except Exception as e:
+        logger.error(f"Failed to obtain managed Gmail auth config: {e!r}")
+        raise HTTPException(
+            status_code=503,
+            detail="Gmail authorization is temporarily unavailable. Please try again in a minute.",
+        )
+
+
+def _resolve_email_auth_config_id(provider: str) -> str:
+    """Return the auth_config_id to use for a given email provider.
+
+    - **Gmail** → always the Composio-managed auth config (ignores
+      `GMAIL_AUTH_CONFIG_ID`), so we never send Google a customized scope list
+      that triggers "This app is blocked".
+    - **Outlook** → the value of `OUTLOOK_AUTH_CONFIG_ID` (unchanged).
+    """
+    if provider == "gmail":
+        return _get_managed_gmail_auth_config_id()
+    if provider == "outlook":
+        cid = EMAIL_AUTH_CONFIGS.get("outlook", "")
+        if not cid:
+            raise HTTPException(
+                status_code=503,
+                detail="Outlook email is not configured. Set OUTLOOK_AUTH_CONFIG_ID.",
+            )
+        return cid
+    raise HTTPException(status_code=404, detail="Unknown email provider")
+
+
+def _email_provider_configured(provider: str) -> bool:
+    """Whether a given email provider can be reached (used by /status)."""
+    if provider == "gmail":
+        # Managed Gmail is available as long as we can talk to Composio.
+        # Treat presence of a valid API key as "configured"; we lazily resolve
+        # the managed auth config on first connect/status call.
+        return bool(COMPOSIO_API_KEY)
+    if provider == "outlook":
+        return bool(EMAIL_AUTH_CONFIGS.get("outlook", ""))
+    return False
+
+
 def _require_email_config(provider: str) -> str:
-    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
-    if not auth_config_id:
-        raise HTTPException(status_code=503, detail=f"{provider.capitalize()} email is not configured. Set {provider.upper()}_AUTH_CONFIG_ID.")
-    return auth_config_id
+    # Backwards-compatible shim used by /send. Now delegates to the resolver
+    # so Gmail routes through Composio's managed auth automatically.
+    return _resolve_email_auth_config_id(provider)
 
 
 async def _get_email_address(provider: str, user_id: str) -> str:
@@ -2205,25 +2298,64 @@ async def _build_email_args(provider: str, to: str, subject: str, body: str, cc=
 
 @api_router.get("/email/{provider}/status")
 async def email_status(provider: str, user_id: str = Depends(get_user_id)):
-    if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
-    if not auth_config_id: return {"provider": provider, "connected": False, "configured": False}
+    """Report whether the user has an ACTIVE email connection for this provider.
+
+    A connection only counts as `connected=True` when:
+      • Composio returns at least one record for this (user, auth_config).
+      • That record has a non-empty ID.
+      • That record's status is ACTIVE (not INITIALIZING / EXPIRED / FAILED /
+        DROPPED / etc.).
+
+    This tightening prevents "half-connected" states (Gmail approvals that
+    never completed, dropped OAuth handshakes, etc.) from being reported as
+    connected — which used to happen when we counted every entry Composio
+    returned regardless of `.id` / `.status`.
+    """
+    if provider not in EMAIL_AUTH_CONFIGS:
+        raise HTTPException(status_code=404, detail="Unknown email provider")
+    if not _email_provider_configured(provider):
+        return {"provider": provider, "connected": False, "configured": False, "connection_id": None}
+    try:
+        auth_config_id = _resolve_email_auth_config_id(provider)
+    except HTTPException:
+        return {"provider": provider, "connected": False, "configured": False, "connection_id": None}
+
     import asyncio
-    def _list(): return _composio_client().connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"])
+    def _list():
+        return _composio_client().connected_accounts.list(
+            user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"]
+        )
     try:
         result = await asyncio.to_thread(_list)
         items = getattr(result, "items", None) or list(result or [])
-        connected = len(items) > 0
-        return {"provider": provider, "connected": connected, "configured": True, "connection_id": getattr(items[0], "id", None) if connected else None}
+        active_id = None
+        for it in items:
+            cid = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
+            status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
+            # Defense-in-depth: some SDK responses ignore the statuses filter.
+            if cid and (status is None or str(status).upper() == "ACTIVE"):
+                active_id = cid
+                break
+        connected = active_id is not None
+        return {
+            "provider": provider,
+            "connected": connected,
+            "configured": True,
+            "connection_id": active_id,
+        }
     except Exception as e:
         logger.warning(f"{provider} email status check failed: {e}")
-        return {"provider": provider, "connected": False, "configured": True, "error": str(e)}
+        return {"provider": provider, "connected": False, "configured": True, "error": _sanitize_upstream_error(e, provider, action="status")}
 
 
 @api_router.post("/email/{provider}/connect")
 async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
     if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = _require_email_config(provider)
+    # Gmail always uses the Composio-managed auth config (see
+    # `_resolve_email_auth_config_id`) — the customized `GMAIL_AUTH_CONFIG_ID`
+    # env var is intentionally NOT read here, because scopes beyond Composio's
+    # verified defaults trigger Google's "This app is blocked" page.
+    auth_config_id = _resolve_email_auth_config_id(provider)
     import asyncio
     def _link(): return _composio_client().connected_accounts.link(user_id=user_id, auth_config_id=auth_config_id, allow_multiple=True)
     try:
@@ -2231,8 +2363,8 @@ async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
     except Exception as e:
         msg = str(e)
         if "Multiple connected accounts" in msg or "already" in msg.lower(): return {"provider": provider, "redirect_url": None, "already_connected": True}
-        logger.error(f"Composio {provider} email connect failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Composio error: {e}")
+        logger.error(f"Composio {provider} email connect failed: {e!r}")
+        raise HTTPException(status_code=502, detail=_sanitize_upstream_error(e, provider, action="connect"))
     redirect_url = getattr(cr, "redirect_url", None) or getattr(cr, "redirectUrl", None)
     if not redirect_url: raise HTTPException(status_code=502, detail="Composio did not return a redirect URL")
     return {"provider": provider, "redirect_url": redirect_url}
@@ -2241,8 +2373,12 @@ async def email_connect(provider: str, user_id: str = Depends(get_user_id)):
 @api_router.get("/email/{provider}/accounts")
 async def list_email_accounts(provider: str, user_id: str = Depends(get_user_id)):
     if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = EMAIL_AUTH_CONFIGS.get(provider, "")
-    if not auth_config_id: return {"provider": provider, "accounts": [], "configured": False}
+    if not _email_provider_configured(provider):
+        return {"provider": provider, "accounts": [], "configured": False}
+    try:
+        auth_config_id = _resolve_email_auth_config_id(provider)
+    except HTTPException:
+        return {"provider": provider, "accounts": [], "configured": False}
     import asyncio
     def _list(): return _composio_client().connected_accounts.list(user_ids=[user_id], auth_config_ids=[auth_config_id], statuses=["ACTIVE"])
     result = await asyncio.to_thread(_list)
@@ -2260,7 +2396,9 @@ async def list_email_accounts(provider: str, user_id: str = Depends(get_user_id)
         conn_id = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
         status = getattr(it, "status", None) or (it.get("status") if isinstance(it, dict) else None)
         created = getattr(it, "created_at", None) or (it.get("created_at") if isinstance(it, dict) else None)
+        # Same tightening as /status: only surface truly ACTIVE, ID-bearing records.
         if not conn_id: continue
+        if status is not None and str(status).upper() != "ACTIVE": continue
         accounts.append({"id": conn_id, "status": status, "created_at": created, "display_name": cached_email or f"\u2026{conn_id[-8:]}"})
     return {"provider": provider, "accounts": accounts, "configured": True}
 
@@ -2270,7 +2408,7 @@ async def delete_email_account(provider: str, conn_id: str, user_id: str = Depen
     import asyncio
     def _del(): return _composio_client().connected_accounts.delete(nanoid=conn_id)
     try: await asyncio.to_thread(_del)
-    except Exception as e: logger.warning(f"Delete email connection {conn_id} failed: {e}"); raise HTTPException(status_code=502, detail=str(e)[:200])
+    except Exception as e: logger.warning(f"Delete email connection {conn_id} failed: {e!r}"); raise HTTPException(status_code=502, detail=_sanitize_upstream_error(e, provider, action="remove account"))
     await db.users.update_one({"user_id": user_id}, {"$unset": {f"email_address_{provider}": ""}})
     return {"deleted": True}
 
@@ -2328,7 +2466,7 @@ async def email_send(provider: str, payload: EmailSendRequest, user_id: str = De
 @api_router.post("/email/{provider}/disconnect")
 async def email_disconnect(provider: str, user_id: str = Depends(get_user_id)):
     if provider not in EMAIL_AUTH_CONFIGS: raise HTTPException(status_code=404, detail="Unknown email provider")
-    auth_config_id = _require_email_config(provider)
+    auth_config_id = _resolve_email_auth_config_id(provider)
     import asyncio
     def _delete_all():
         client = _composio_client()
@@ -2352,7 +2490,7 @@ async def _execute_email_send(user_id: str, provider: str, to: str, subject: str
     """Internal helper that the scheduler calls to send scheduled emails."""
     import asyncio
     if provider not in EMAIL_SEND_TOOLS: return {"provider": provider, "success": False, "error": "Unknown email provider"}
-    if not EMAIL_AUTH_CONFIGS.get(provider): return {"provider": provider, "success": False, "error": f"{provider} not configured"}
+    if not _email_provider_configured(provider): return {"provider": provider, "success": False, "error": f"{provider} not configured"}
     tool = EMAIL_SEND_TOOLS[provider]
     args = await _build_email_args(provider, to, subject, body, cc, bcc, is_html)
     def _exec(): return _composio_client().tools.execute(user_id=user_id, slug=tool["slug"], arguments=args, dangerously_skip_version_check=True)
