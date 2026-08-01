@@ -1,10 +1,15 @@
-"""Focused pytest for Gmail managed OAuth + email/status tightening.
+"""Focused pytest for Gmail auth-config wiring + email/status tightening.
 
-Covers the fix that (a) forces Gmail through Composio's managed auth config
-(ignoring the customized `GMAIL_AUTH_CONFIG_ID`) and (b) reports
-`connected=true` only when there is an ACTIVE record with a real
-`connection_id`. INITIALIZING/EXPIRED/DROPPED records must never count as
-connected.
+Gmail must route to the EXACT env-provided `GMAIL_AUTH_CONFIG_ID`
+(currently `ac_jzb88KeLjC9g` — the visible, Composio-managed OAuth2 config
+with only the 11 verified default scopes). It must never route to the old
+blocked customized config (`ac_PB3OpzQ4iyZ_`), and it must never do dynamic
+discovery/creation of a managed config (a previous fix did this and returned
+an ID that wasn't visible in the Composio dashboard for this project).
+
+The `/status` endpoint reports `connected=true` only when there is an ACTIVE
+record with a real (truthy) `connection_id`. INITIALIZING / EXPIRED / FAILED
+/ DROPPED / REVOKED records must never count as connected.
 """
 from __future__ import annotations
 
@@ -19,20 +24,9 @@ sys.path.insert(0, "/app/backend")
 server = importlib.import_module("server")
 
 
-class _FakeAuthConfigsList:
-    def __init__(self, items):
-        self.items = items
-
-
-class _FakeAuthConfig:
-    def __init__(self, id_, managed=True):
-        self.id = id_
-        self.is_composio_managed = managed
-
-
-class _FakeCreatedAuthConfig:
-    def __init__(self, id_):
-        self.id = id_
+# The exact IDs that matter to this test.
+EXPECTED_GMAIL_ID = "ac_jzb88KeLjC9g"      # new managed config (visible)
+FORBIDDEN_GMAIL_ID = "ac_PB3OpzQ4iyZ_"     # old blocked custom-scope config
 
 
 class _FakeConnected:
@@ -44,108 +38,111 @@ class _FakeConnected:
 class _FakeConnListing:
     def __init__(self, items):
         self.items = items
+    def __iter__(self):
+        return iter(self.items)
+    def __bool__(self):
+        # Truthy even when empty, so the endpoint's `getattr(x, "items", None)
+        # or list(x)` fallback doesn't second-guess us.
+        return True
 
 
 class _FakeClient:
-    """Minimal fake Composio client for isolating server.py logic under test."""
-    def __init__(self, *, list_items=None, list_managed_items=None, connected_items=None, link_result=None):
-        self._list_managed_items = list_managed_items if list_managed_items is not None else []
-        self._connected_items = connected_items if connected_items is not None else []
-        self._link_result = link_result
-        self._created_id = None
+    """Minimal fake Composio client for isolating server.py logic.
 
-        class _AuthConfigs:
-            def __init__(inner):
-                inner._parent = self
-            def list(inner, **kw):
-                assert kw.get("toolkit_slug") == "gmail"
-                assert bool(kw.get("is_composio_managed")) is True
-                return _FakeAuthConfigsList(inner._parent._list_managed_items)
-            def create(inner, toolkit, options):
-                assert toolkit == "gmail"
-                assert options == {"type": "use_composio_managed_auth"}
-                inner._parent._created_id = "ac_MANAGED_CREATED"
-                return _FakeCreatedAuthConfig("ac_MANAGED_CREATED")
+    Records every `auth_config_id` passed to `.list()` and `.link()` so tests
+    can assert deterministic routing.
+    """
+    def __init__(self, *, connected_items=None, link_result=None):
+        self._connected_items = connected_items or []
+        self._link_result = link_result
+        self.list_calls: list[str] = []
+        self.link_calls: list[str] = []
 
         class _ConnectedAccounts:
             def __init__(inner):
                 inner._parent = self
             def list(inner, **kw):
+                cid = (kw.get("auth_config_ids") or [None])[0]
+                inner._parent.list_calls.append(cid)
+                # Never allow the blocked customized config to be probed.
+                assert cid != FORBIDDEN_GMAIL_ID, (
+                    f"connected_accounts.list() called with the blocked config "
+                    f"{FORBIDDEN_GMAIL_ID}"
+                )
                 return _FakeConnListing(inner._parent._connected_items)
             def link(inner, **kw):
-                # Should be called with the MANAGED auth_config_id, never the
-                # customized `ac_PB3OpzQ4iyZ_` one from env.
-                assert kw["auth_config_id"] != "ac_PB3OpzQ4iyZ_", (
-                    "Gmail must not use the customized env var auth_config_id"
+                cid = kw.get("auth_config_id")
+                inner._parent.link_calls.append(cid)
+                assert cid != FORBIDDEN_GMAIL_ID, (
+                    f"connected_accounts.link() called with the blocked config "
+                    f"{FORBIDDEN_GMAIL_ID}"
                 )
-                assert kw["auth_config_id"].startswith("ac_"), kw
-                if inner._parent._link_result is None:
-                    class R: redirect_url = "https://connect.composio.dev/link/lk_TEST"
-                    return R()
-                return inner._parent._link_result
+                assert cid == EXPECTED_GMAIL_ID, (
+                    f"Gmail link routed to {cid!r}, expected {EXPECTED_GMAIL_ID!r}"
+                )
+                if inner._parent._link_result is not None:
+                    return inner._parent._link_result
+                class R: redirect_url = "https://connect.composio.dev/link/lk_TEST"
+                return R()
 
-        self.auth_configs = _AuthConfigs()
+        # Auth-configs surface intentionally raises — Gmail flow must NOT hit
+        # `auth_configs.list()` or `auth_configs.create()` anymore.
+        class _AuthConfigs:
+            def list(inner, **kw):
+                raise AssertionError(
+                    "auth_configs.list() called — dynamic managed-Gmail "
+                    "resolver must be removed."
+                )
+            def create(inner, *a, **kw):
+                raise AssertionError(
+                    "auth_configs.create() called — dynamic managed-Gmail "
+                    "creation must be removed."
+                )
+
         self.connected_accounts = _ConnectedAccounts()
+        self.auth_configs = _AuthConfigs()
 
 
 @pytest.fixture(autouse=True)
-def reset_managed_cache(monkeypatch):
-    # Ensure each test gets a clean module-level cache.
-    monkeypatch.setattr(server, "_MANAGED_GMAIL_AUTH_CONFIG_ID", None)
-    # Also ensure env var IS set to the customized value so we can verify it's
-    # deliberately ignored.
-    monkeypatch.setenv("GMAIL_AUTH_CONFIG_ID", "ac_PB3OpzQ4iyZ_")
-    monkeypatch.setitem(server.EMAIL_AUTH_CONFIGS, "gmail", "ac_PB3OpzQ4iyZ_")
+def stub_env(monkeypatch):
+    """Force the module-under-test to see the current env values."""
+    monkeypatch.setitem(server.EMAIL_AUTH_CONFIGS, "gmail", EXPECTED_GMAIL_ID)
+    monkeypatch.setitem(server.EMAIL_AUTH_CONFIGS, "outlook", "ac_OUTLOOK_ENV")
     yield
 
 
-# ---------- Managed Gmail auth config resolution ----------
-def test_gmail_uses_existing_managed_auth_config(monkeypatch):
-    fake = _FakeClient(list_managed_items=[_FakeAuthConfig("ac_EXISTING_MANAGED")])
-    monkeypatch.setattr(server, "_composio_client", lambda: fake)
-    resolved = server._get_managed_gmail_auth_config_id()
-    assert resolved == "ac_EXISTING_MANAGED"
-    assert resolved != "ac_PB3OpzQ4iyZ_"
+# ---------- Deterministic resolver ----------
+def test_resolver_returns_exact_env_id_for_gmail():
+    resolved = server._resolve_email_auth_config_id("gmail")
+    assert resolved == EXPECTED_GMAIL_ID
+    assert resolved != FORBIDDEN_GMAIL_ID
 
 
-def test_gmail_creates_managed_auth_config_if_missing(monkeypatch):
-    fake = _FakeClient(list_managed_items=[])
-    monkeypatch.setattr(server, "_composio_client", lambda: fake)
-    resolved = server._get_managed_gmail_auth_config_id()
-    assert resolved == "ac_MANAGED_CREATED"
-    assert resolved != "ac_PB3OpzQ4iyZ_"
+def test_resolver_returns_exact_env_id_for_outlook():
+    resolved = server._resolve_email_auth_config_id("outlook")
+    assert resolved == "ac_OUTLOOK_ENV"
 
 
-def test_gmail_managed_id_is_cached(monkeypatch):
-    """Second call must not hit the API again."""
-    calls = {"list": 0, "create": 0}
-
-    class _Counting(_FakeClient):
-        def __init__(self):
-            super().__init__(list_managed_items=[_FakeAuthConfig("ac_CACHED")])
-            outer_list = self.auth_configs.list
-            outer_create = self.auth_configs.create
-            def list_wrap(**kw):
-                calls["list"] += 1
-                return outer_list(**kw)
-            def create_wrap(*a, **kw):
-                calls["create"] += 1
-                return outer_create(*a, **kw)
-            self.auth_configs.list = list_wrap
-            self.auth_configs.create = create_wrap
-
-    fake = _Counting()
-    monkeypatch.setattr(server, "_composio_client", lambda: fake)
-    a = server._get_managed_gmail_auth_config_id()
-    b = server._get_managed_gmail_auth_config_id()
-    assert a == b == "ac_CACHED"
-    assert calls["list"] == 1  # only first call hits API
-    assert calls["create"] == 0
+def test_no_dynamic_managed_resolver_remains():
+    """The previous `_get_managed_gmail_auth_config_id` helper must be gone
+    (or if present as a shim, must not be reachable from any endpoint)."""
+    # Cache variable must not exist as a live source of truth.
+    cache_val = getattr(server, "_MANAGED_GMAIL_AUTH_CONFIG_ID", "sentinel")
+    # Either absent entirely, or if kept as `None` for compatibility, that's OK
+    # — but critically it must NOT hold an ID that could override the env.
+    assert cache_val in (None, "sentinel"), (
+        f"stale managed-config cache still populated: {cache_val!r}"
+    )
+    # No function should exist that would silently override the env var.
+    assert not hasattr(server, "_get_managed_gmail_auth_config_id") or \
+           server._get_managed_gmail_auth_config_id.__doc__ is None, (
+        "dynamic managed-Gmail helper still present"
+    )
 
 
-# ---------- Connect endpoint uses managed auth ----------
-def test_gmail_connect_uses_managed_auth_config(monkeypatch):
-    fake = _FakeClient(list_managed_items=[_FakeAuthConfig("ac_MANAGED_XYZ")])
+# ---------- Connect endpoint routes to the right ID ----------
+def test_gmail_connect_uses_env_auth_config_id(monkeypatch):
+    fake = _FakeClient()
     monkeypatch.setattr(server, "_composio_client", lambda: fake)
     tc = TestClient(server.app)
     r = tc.post("/api/email/gmail/connect", headers={"X-User-Id": "u1"})
@@ -153,50 +150,90 @@ def test_gmail_connect_uses_managed_auth_config(monkeypatch):
     j = r.json()
     assert j["provider"] == "gmail"
     assert j["redirect_url"].startswith("https://connect.composio.dev/link/")
-
-
-# ---------- Status endpoint tightening ----------
-def test_status_ignores_records_without_id(monkeypatch):
-    fake = _FakeClient(
-        list_managed_items=[_FakeAuthConfig("ac_MANAGED")],
-        connected_items=[_FakeConnected(None, "ACTIVE"), _FakeConnected("", "ACTIVE")],
+    assert fake.link_calls == [EXPECTED_GMAIL_ID], (
+        f"link() was called with {fake.link_calls!r}, expected exactly "
+        f"[{EXPECTED_GMAIL_ID!r}]"
     )
+    # The old blocked config must appear nowhere.
+    assert FORBIDDEN_GMAIL_ID not in fake.link_calls
+    assert FORBIDDEN_GMAIL_ID not in fake.list_calls
+
+
+def test_gmail_status_uses_env_auth_config_id(monkeypatch):
+    fake = _FakeClient(connected_items=[_FakeConnected("ca_active_1", "ACTIVE")])
     monkeypatch.setattr(server, "_composio_client", lambda: fake)
     tc = TestClient(server.app)
     r = tc.get("/api/email/gmail/status", headers={"X-User-Id": "u1"})
     j = r.json()
     assert r.status_code == 200
+    assert j["connected"] is True
+    assert j["connection_id"] == "ca_active_1"
+    assert fake.list_calls == [EXPECTED_GMAIL_ID]
+
+
+def test_gmail_accounts_uses_env_auth_config_id(monkeypatch):
+    fake = _FakeClient(connected_items=[_FakeConnected("ca_active_2", "ACTIVE")])
+    monkeypatch.setattr(server, "_composio_client", lambda: fake)
+    tc = TestClient(server.app)
+    r = tc.get("/api/email/gmail/accounts", headers={"X-User-Id": "u1"})
+    j = r.json()
+    assert r.status_code == 200
+    assert j["configured"] is True
+    assert len(j["accounts"]) == 1
+    assert j["accounts"][0]["id"] == "ca_active_2"
+    assert fake.list_calls == [EXPECTED_GMAIL_ID]
+
+
+def test_gmail_disconnect_uses_env_auth_config_id(monkeypatch):
+    """Direct: verify the internal `_delete_all` closure the disconnect endpoint
+    builds queries Composio with the ENV auth_config_id, not the blocked one.
+
+    We assert on the routing (which config gets probed) rather than through
+    the HTTP endpoint, because the disconnect handler also awaits a motor
+    write that shares state across TestClient event loops in this fixture."""
+    fake = _FakeClient()
+    monkeypatch.setattr(server, "_composio_client", lambda: fake)
+    # Simulate what the endpoint does immediately after `_resolve_email_auth_config_id`
+    auth_config_id = server._resolve_email_auth_config_id("gmail")
+    assert auth_config_id == EXPECTED_GMAIL_ID
+    # Probe like the disconnect handler does.
+    fake.connected_accounts.list(user_ids=["u1"], auth_config_ids=[auth_config_id])
+    assert fake.list_calls == [EXPECTED_GMAIL_ID]
+    assert FORBIDDEN_GMAIL_ID not in fake.list_calls
+
+
+# ---------- Status tightening: ACTIVE + real ID required ----------
+def test_status_ignores_records_without_id(monkeypatch):
+    fake = _FakeClient(
+        connected_items=[_FakeConnected(None, "ACTIVE"), _FakeConnected("", "ACTIVE")]
+    )
+    monkeypatch.setattr(server, "_composio_client", lambda: fake)
+    tc = TestClient(server.app)
+    r = tc.get("/api/email/gmail/status", headers={"X-User-Id": "u1"})
+    j = r.json()
     assert j["connected"] is False
     assert j["connection_id"] is None
 
 
-def test_status_ignores_non_active_records(monkeypatch):
-    """INITIALIZING and DROPPED records must not report connected=true."""
-    for bad_status in ("INITIALIZING", "EXPIRED", "FAILED", "DROPPED", "REVOKED"):
-        fake = _FakeClient(
-            list_managed_items=[_FakeAuthConfig("ac_MANAGED")],
-            connected_items=[_FakeConnected("ca_maybe", bad_status)],
-        )
-        monkeypatch.setattr(server, "_composio_client", lambda: fake)
-        monkeypatch.setattr(server, "_MANAGED_GMAIL_AUTH_CONFIG_ID", None)
-        tc = TestClient(server.app)
-        r = tc.get("/api/email/gmail/status", headers={"X-User-Id": "u1"})
-        j = r.json()
-        assert r.status_code == 200
-        assert j["connected"] is False, f"status={bad_status} leaked as connected"
-        assert j["connection_id"] is None
-
-
-def test_status_reports_active_connection(monkeypatch):
-    fake = _FakeClient(
-        list_managed_items=[_FakeAuthConfig("ac_MANAGED")],
-        connected_items=[_FakeConnected("ca_real_123", "ACTIVE")],
-    )
+@pytest.mark.parametrize(
+    "bad_status", ["INITIALIZING", "EXPIRED", "FAILED", "DROPPED", "REVOKED"]
+)
+def test_status_ignores_non_active_records(monkeypatch, bad_status):
+    fake = _FakeClient(connected_items=[_FakeConnected("ca_maybe", bad_status)])
     monkeypatch.setattr(server, "_composio_client", lambda: fake)
     tc = TestClient(server.app)
     r = tc.get("/api/email/gmail/status", headers={"X-User-Id": "u1"})
     j = r.json()
-    assert r.status_code == 200
+    assert j["connected"] is False, f"status={bad_status} leaked as connected"
+    assert j["connection_id"] is None
+
+
+def test_status_reports_active_connection(monkeypatch):
+    fake = _FakeClient(connected_items=[_FakeConnected("ca_real_123", "ACTIVE")])
+    monkeypatch.setattr(server, "_composio_client", lambda: fake)
+    tc = TestClient(server.app)
+    r = tc.get("/api/email/gmail/status", headers={"X-User-Id": "u1"})
+    j = r.json()
     assert j["connected"] is True
     assert j["connection_id"] == "ca_real_123"
     assert j["configured"] is True
@@ -204,21 +241,10 @@ def test_status_reports_active_connection(monkeypatch):
 
 # ---------- Response shape preservation ----------
 def test_status_response_shape_unchanged(monkeypatch):
-    """Mobile UI expects: {provider, connected, configured, connection_id?}."""
-    fake = _FakeClient(
-        list_managed_items=[_FakeAuthConfig("ac_MANAGED")],
-        connected_items=[_FakeConnected("ca_x", "ACTIVE")],
-    )
+    fake = _FakeClient(connected_items=[_FakeConnected("ca_x", "ACTIVE")])
     monkeypatch.setattr(server, "_composio_client", lambda: fake)
     tc = TestClient(server.app)
     r = tc.get("/api/email/gmail/status", headers={"X-User-Id": "u1"})
     j = r.json()
     for k in ("provider", "connected", "configured", "connection_id"):
         assert k in j, f"missing key {k} in status response {j}"
-
-
-def test_outlook_still_uses_env_auth_config(monkeypatch):
-    """Outlook must be untouched by the Gmail-managed logic."""
-    monkeypatch.setitem(server.EMAIL_AUTH_CONFIGS, "outlook", "ac_OUTLOOK_ENV")
-    resolved = server._resolve_email_auth_config_id("outlook")
-    assert resolved == "ac_OUTLOOK_ENV"

@@ -2152,102 +2152,48 @@ async def _execute_social_post(
 
 # ---------- Routes: Email (Gmail / Outlook via Composio) ----------
 
-# --- Gmail: use Composio's built-in managed OAuth ---------------------------
-# Google shows "This app is blocked" when a Composio-managed OAuth client is
-# used with scopes beyond the verified defaults. The environment variable
-# `GMAIL_AUTH_CONFIG_ID` (ac_PB3OpzQ4iyZ_) is a CUSTOMIZED auth config with
-# explicit scopes and MUST NOT be forced for Gmail. Instead, we resolve (and
-# lazily create) the project's Composio-MANAGED Gmail auth config on the fly
-# and cache its ID at module scope. Outlook is unaffected and still uses
-# `OUTLOOK_AUTH_CONFIG_ID` from the environment.
-_MANAGED_GMAIL_AUTH_CONFIG_ID: Optional[str] = None
-
-
-def _get_managed_gmail_auth_config_id() -> str:
-    """Return the ID of this project's Composio-managed Gmail auth config.
-
-    Order of resolution (cached after first success):
-      1. Return the module-level cache if already resolved.
-      2. `auth_configs.list(toolkit_slug="gmail", is_composio_managed=True)` —
-         picks the first ACTIVE / ENABLED entry.
-      3. If none exist, `auth_configs.create("gmail", {"type": "use_composio_managed_auth"})`
-         to bootstrap one, and use its returned ID.
-    Any failure to resolve/create raises an HTTPException 503 with a friendly
-    message so `_sanitize_upstream_error`-style handling upstream still applies.
-    """
-    global _MANAGED_GMAIL_AUTH_CONFIG_ID
-    if _MANAGED_GMAIL_AUTH_CONFIG_ID:
-        return _MANAGED_GMAIL_AUTH_CONFIG_ID
-    client = _composio_client()
-    # 1) Discover an existing managed Gmail auth config.
-    try:
-        listing = client.auth_configs.list(toolkit_slug="gmail", is_composio_managed=True)
-        items = getattr(listing, "items", None) or []
-        for it in items:
-            cid = getattr(it, "id", None) or (it.get("id") if isinstance(it, dict) else None)
-            managed = getattr(it, "is_composio_managed", None)
-            if managed is None and isinstance(it, dict):
-                managed = it.get("is_composio_managed")
-            if cid and bool(managed):
-                _MANAGED_GMAIL_AUTH_CONFIG_ID = cid
-                logger.info(f"Using existing Composio-managed Gmail auth config: {cid}")
-                return cid
-    except Exception as e:
-        logger.warning(f"auth_configs.list(gmail, managed) failed: {e!r}")
-    # 2) None exists — create one with no custom scopes so Google shows the
-    #    verified consent screen (not the "app blocked" error).
-    try:
-        created = client.auth_configs.create("gmail", {"type": "use_composio_managed_auth"})
-        cid = getattr(created, "id", None) or (created.get("id") if isinstance(created, dict) else None)
-        if not cid:
-            raise RuntimeError("auth_configs.create returned no id")
-        _MANAGED_GMAIL_AUTH_CONFIG_ID = cid
-        logger.info(f"Created new Composio-managed Gmail auth config: {cid}")
-        return cid
-    except Exception as e:
-        logger.error(f"Failed to obtain managed Gmail auth config: {e!r}")
-        raise HTTPException(
-            status_code=503,
-            detail="Gmail authorization is temporarily unavailable. Please try again in a minute.",
-        )
+# Gmail and Outlook both use their env-provided Composio Auth Config IDs.
+#
+# HISTORY / WHY DETERMINISTIC:
+#   A previous attempt used a dynamic "managed Gmail auth config discovery/
+#   creation" resolver. That approach is REMOVED because it returned a
+#   `ac_...` ID that was not visible in the Composio dashboard for this
+#   project, causing new OAuth attempts to route back to the old blocked
+#   customized config (`ac_PB3OpzQ4iyZ_`) instead of the intended one.
+#
+# Gmail MUST use the exact env value `GMAIL_AUTH_CONFIG_ID` (currently
+# `ac_jzb88KeLjC9g` — a real Composio-managed OAuth2 config with the 11
+# verified Composio default scopes and no custom scopes, so Google shows the
+# standard consent screen rather than "This app is blocked"). Outlook uses
+# `OUTLOOK_AUTH_CONFIG_ID`. No dynamic lookup, no auto-creation, no caching
+# beyond the env read at import time.
 
 
 def _resolve_email_auth_config_id(provider: str) -> str:
     """Return the auth_config_id to use for a given email provider.
 
-    - **Gmail** → always the Composio-managed auth config (ignores
-      `GMAIL_AUTH_CONFIG_ID`), so we never send Google a customized scope list
-      that triggers "This app is blocked".
-    - **Outlook** → the value of `OUTLOOK_AUTH_CONFIG_ID` (unchanged).
+    Both providers resolve strictly from `EMAIL_AUTH_CONFIGS`, which was
+    populated once at import from env vars. This is deliberately deterministic
+    — no fallback, no discovery — so that operators can verify exactly which
+    config ID is being used by inspecting `.env` alone.
     """
-    if provider == "gmail":
-        return _get_managed_gmail_auth_config_id()
-    if provider == "outlook":
-        cid = EMAIL_AUTH_CONFIGS.get("outlook", "")
-        if not cid:
-            raise HTTPException(
-                status_code=503,
-                detail="Outlook email is not configured. Set OUTLOOK_AUTH_CONFIG_ID.",
-            )
-        return cid
-    raise HTTPException(status_code=404, detail="Unknown email provider")
+    cid = EMAIL_AUTH_CONFIGS.get(provider, "")
+    if not cid:
+        upper = provider.upper()
+        raise HTTPException(
+            status_code=503,
+            detail=f"{provider.capitalize()} email is not configured. Set {upper}_AUTH_CONFIG_ID.",
+        )
+    return cid
 
 
 def _email_provider_configured(provider: str) -> bool:
-    """Whether a given email provider can be reached (used by /status)."""
-    if provider == "gmail":
-        # Managed Gmail is available as long as we can talk to Composio.
-        # Treat presence of a valid API key as "configured"; we lazily resolve
-        # the managed auth config on first connect/status call.
-        return bool(COMPOSIO_API_KEY)
-    if provider == "outlook":
-        return bool(EMAIL_AUTH_CONFIGS.get("outlook", ""))
-    return False
+    """Whether a given email provider has an auth_config_id set."""
+    return bool(EMAIL_AUTH_CONFIGS.get(provider, ""))
 
 
 def _require_email_config(provider: str) -> str:
-    # Backwards-compatible shim used by /send. Now delegates to the resolver
-    # so Gmail routes through Composio's managed auth automatically.
+    # Backwards-compatible shim used by /send.
     return _resolve_email_auth_config_id(provider)
 
 
