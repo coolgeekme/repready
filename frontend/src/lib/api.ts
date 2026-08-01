@@ -180,7 +180,6 @@ export const api = {
   createCompany: (body: any) => request<any>("/companies", { method: "POST", body: JSON.stringify(body) }),
   updateCompany: (id: string, body: any) => request<any>(`/companies/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteCompany: (id: string) => request<any>(`/companies/${id}`, { method: "DELETE" }),
-  activateCompany: (id: string) => request<any>(`/companies/${id}/activate`, { method: "POST" }),
 
   // Scheduled posts
   schedulePost: (body: any) => request<any>("/scheduled", { method: "POST", body: JSON.stringify(body) }),

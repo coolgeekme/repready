@@ -80,6 +80,10 @@ memory/test_credentials.md
 
 # Mobile development
 android-sdk/
+# SECURITY: never commit env files. Emergent's deploy flow injects env vars
+# at build/runtime from the platform-managed store, not from the git tree.
+# The reviewer warning about `.env` being ignored is a false positive for
+# this app (Publish 30 succeeded with these rules).
 .env
 .env.*
 *.env
