@@ -4,7 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, radii, spacing } from "@/src/theme";
 
-type Platform = "linkedin" | "facebook" | "instagram";
+type Platform = "linkedin" | "facebook" | "instagram" | "gmail" | "outlook";
 
 type Props = {
   visible: boolean;
@@ -19,6 +19,8 @@ const PLATFORMS: { key: Platform; label: string; icon: keyof typeof import("@exp
   { key: "linkedin", label: "LinkedIn", icon: "logo-linkedin", color: "#0A66C2" },
   { key: "facebook", label: "Facebook", icon: "logo-facebook", color: "#1877F2" },
   { key: "instagram", label: "Instagram", icon: "logo-instagram", color: "#E1306C" },
+  { key: "gmail", label: "Gmail", icon: "logo-google", color: "#EA4335" },
+  { key: "outlook", label: "Outlook", icon: "logo-microsoft", color: "#0078D4" },
 ];
 
 const WEEKDAY_FULL = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

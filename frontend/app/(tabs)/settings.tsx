@@ -10,6 +10,7 @@ import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/contexts/AuthContext";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radii, spacing } from "@/src/theme";
+import EmailConnectionSection from "@/src/components/EmailConnectionSection";
 
 const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "Founder/CEO"];
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
@@ -300,6 +301,9 @@ export default function Settings() {
           <Text style={styles.uploadText}>{profile.guidelines_file_name || "Choose file"}</Text>
           <Text style={styles.uploadHint}>PDF / TXT</Text>
         </TouchableOpacity>
+
+        {/* Email accounts */}
+        <EmailConnectionSection onToast={(m, ms) => { setToast(m); setTimeout(() => setToast(null), ms || 1600); }} />
 
         {/* Sign out */}
         <TouchableOpacity testID="settings-signout" style={styles.signOut} onPress={signOutUser}>
