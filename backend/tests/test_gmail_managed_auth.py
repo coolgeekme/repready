@@ -25,8 +25,17 @@ server = importlib.import_module("server")
 
 
 # The exact IDs that matter to this test.
-EXPECTED_GMAIL_ID = "ac_jzb88KeLjC9g"      # new managed config (visible)
-FORBIDDEN_GMAIL_ID = "ac_PB3OpzQ4iyZ_"     # old blocked custom-scope config
+EXPECTED_GMAIL_ID = "ac_jzb88KeLjC9g"      # new managed config (visible in new project)
+FORBIDDEN_GMAIL_ID = "ac_PB3OpzQ4iyZ_"     # old blocked custom-scope config (old project)
+# Any ID belonging to the previous, inaccessible Composio project. These must
+# never appear in `link()` / `list()` calls after the project migration.
+FORBIDDEN_OLD_PROJECT_IDS = (
+    "ac_PB3OpzQ4iyZ_",   # old customized Gmail (blocked scopes)
+    "ac_xdxvKCPIYO1H",   # dynamically-created Gmail from removed resolver
+    "ac_AgbcO8xE8C4O",   # old-project LinkedIn
+    "ac_gbTI-sLndWAg",   # old-project Instagram
+    "ac_HVGdfG7dKSeS",   # old-project Facebook
+)
 
 
 class _FakeConnected:
@@ -154,9 +163,10 @@ def test_gmail_connect_uses_env_auth_config_id(monkeypatch):
         f"link() was called with {fake.link_calls!r}, expected exactly "
         f"[{EXPECTED_GMAIL_ID!r}]"
     )
-    # The old blocked config must appear nowhere.
-    assert FORBIDDEN_GMAIL_ID not in fake.link_calls
-    assert FORBIDDEN_GMAIL_ID not in fake.list_calls
+    # No old-project IDs must appear anywhere.
+    for forbidden in FORBIDDEN_OLD_PROJECT_IDS:
+        assert forbidden not in fake.link_calls
+        assert forbidden not in fake.list_calls
 
 
 def test_gmail_status_uses_env_auth_config_id(monkeypatch):
@@ -199,7 +209,8 @@ def test_gmail_disconnect_uses_env_auth_config_id(monkeypatch):
     # Probe like the disconnect handler does.
     fake.connected_accounts.list(user_ids=["u1"], auth_config_ids=[auth_config_id])
     assert fake.list_calls == [EXPECTED_GMAIL_ID]
-    assert FORBIDDEN_GMAIL_ID not in fake.list_calls
+    for forbidden in FORBIDDEN_OLD_PROJECT_IDS:
+        assert forbidden not in fake.list_calls
 
 
 # ---------- Status tightening: ACTIVE + real ID required ----------
