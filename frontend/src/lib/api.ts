@@ -14,6 +14,12 @@ async function authHeaders(): Promise<Record<string, string>> {
 /** Convert an arbitrary error response body into a safe, plain-text message.
  *  - Never lets raw HTML (e.g. a Cloudflare/nginx error page overlaid by an
  *    edge proxy) propagate into UI toasts.
+ *  - Never lets a Composio Python-dict-repr error propagate either — the
+ *    stale backend some old builds still call returns messages like
+ *      "Error code: 404 - {'error': {'message': 'Auth config not found',
+ *       'code': 302, 'slug': 'Auth_Config_NotFound', ...}}"
+ *    We collapse that into "Auth config not found" (or similar) so the
+ *    toast is at least readable.
  *  - Extracts `detail` from FastAPI JSON error bodies when present.
  */
 function safeErrorText(status: number, rawText: string): string {
@@ -33,17 +39,31 @@ function safeErrorText(status: number, rawText: string): string {
     return "The service is temporarily unreachable. Please try again in a minute.";
   }
   // Try to parse FastAPI-style {"detail": "..."} envelopes.
+  let payload: string | null = null;
   try {
     const parsed = JSON.parse(text);
     const d = parsed?.detail ?? parsed?.error ?? parsed?.message;
-    if (typeof d === "string" && d.trim()) {
-      // Strip any embedded HTML tags as defense-in-depth.
-      return d.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
-    }
+    if (typeof d === "string" && d.trim()) payload = d;
   } catch {
-    // not JSON — fall through
+    payload = text;
   }
-  // Plain text — strip HTML tags defensively, trim & cap length.
+  if (payload) {
+    // Defense against a stale backend that returns raw Composio SDK errors
+    // like "Error code: 404 - {'error': {'message': 'Auth config not found', ...}}"
+    if (/auth[_ ]config[_ ]?not[_ ]?found/i.test(payload) ||
+        /Auth_Config_NotFound/i.test(payload)) {
+      return "This connection is temporarily misconfigured on our servers. Please try again in a minute or contact support@coolgeek.me.";
+    }
+    // Generic Composio dict-repr leak — extract only the `message` field.
+    const dictMatch = payload.match(/['"]message['"]\s*:\s*['"]([^'"]{3,120})['"]/);
+    if (/Error code:\s*\d+/i.test(payload) && dictMatch) {
+      return dictMatch[1];
+    }
+    if (/Error code:\s*\d+/i.test(payload) && payload.includes("{'error'")) {
+      return "The authorization service returned an error. Please try again shortly.";
+    }
+    return payload.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
+  }
   return text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 240);
 }
 

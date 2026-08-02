@@ -1576,12 +1576,35 @@ def _sanitize_upstream_error(raw: Any, platform: str, action: str = "connect") -
         return (f"Couldn't {action} {platform.capitalize()} right now. "
                 "Please try again in a moment.")
     # Known Composio auth-config problems → actionable message.
-    if "invalid auth_config" in clean.lower() or "auth_config_id" in clean.lower():
-        return (f"{platform.capitalize()} isn't set up correctly on our side. "
-                "Please contact support@coolgeek.me.")
-    if "unauthorized" in clean.lower() or "invalid api key" in clean.lower():
+    #
+    # The Composio Python SDK stringifies its API errors as, for example:
+    #   "Error code: 404 - {'error': {'message': 'Auth config not found',
+    #    'code': 302, 'slug': 'Auth_Config_NotFound', 'status': 404,
+    #    'request_id': '...', 'suggested_fix': ''}}"
+    # We detect that exact family of errors here BEFORE returning any raw
+    # provider text, so the toast never shows a Python dict repr again.
+    low_clean = clean.lower()
+    if ("auth_config_notfound" in low_clean
+            or "auth config not found" in low_clean
+            or "invalid auth_config" in low_clean
+            or "auth_config_id" in low_clean
+            or "auth config" in low_clean and "not found" in low_clean):
+        return (f"{platform.capitalize()} authorization is temporarily "
+                "misconfigured on our side. Please try again shortly, or "
+                "contact support@coolgeek.me if the issue persists.")
+    if "unauthorized" in low_clean or "invalid api key" in low_clean:
         return (f"{platform.capitalize()} authorization service is temporarily "
                 "unavailable. Please try again shortly.")
+    # Composio SDK's generic "Error code: <n> - {...}" wrapper — extract the
+    # `message` field from the embedded dict repr if present, else strip the
+    # whole dict-shaped tail so users don't see raw Python syntax.
+    if "error code:" in low_clean and ("{'error':" in clean or '{"error":' in clean):
+        m = re.search(r"'message'\s*:\s*'([^']{3,120})'", clean) \
+            or re.search(r'"message"\s*:\s*"([^"]{3,120})"', clean)
+        if m:
+            return f"{platform.capitalize()}: {m.group(1)}"
+        return (f"{platform.capitalize()} authorization service returned an "
+                "error. Please try again in a moment.")
     return clean[:240]
 
 
