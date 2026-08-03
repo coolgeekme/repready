@@ -164,17 +164,6 @@ export const api = {
     return res;
   },
 
-  // Email (Gmail / Outlook via Composio) — mirrored from remote email-integration PR.
-  emailStatus: (provider: string) =>
-    request<any>(`/email/${provider}/status`),
-  emailConnect: (provider: string) =>
-    request<any>(`/email/${provider}/connect`, { method: "POST" }),
-  emailDisconnect: (provider: string) =>
-    request<any>(`/email/${provider}/disconnect`, { method: "POST" }),
-  emailAccounts: (provider: string) =>
-    request<any>(`/email/${provider}/accounts`),
-  emailSend: (provider: string, body: { to: string; subject: string; body: string; cc?: string[]; bcc?: string[]; is_html?: boolean; history_id?: string; connected_account_id?: string }) =>
-    request<any>(`/email/${provider}/send`, { method: "POST", body: JSON.stringify(body) }),
 
   // History detail + partial update (for images + selected_accounts persistence)
   getHistoryItem: (id: string) => request<any>(`/history/${id}`),

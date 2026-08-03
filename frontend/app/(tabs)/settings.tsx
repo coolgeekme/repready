@@ -10,7 +10,6 @@ import { router, useFocusEffect } from "expo-router";
 import { useAuth } from "@/src/contexts/AuthContext";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radii, spacing } from "@/src/theme";
-import EmailConnectionSection from "@/src/components/EmailConnectionSection";
 
 const ROLES = ["SDR", "BDR", "AE", "Account Manager", "CSM", "Sales Engineer", "Founder/CEO"];
 const INDUSTRIES = ["SaaS", "FinTech", "Healthcare", "Manufacturing", "Education", "E-commerce", "Real Estate", "Marketing"];
@@ -303,7 +302,6 @@ export default function Settings() {
         </TouchableOpacity>
 
         {/* Email accounts */}
-        <EmailConnectionSection onToast={(m, ms) => { setToast(m); setTimeout(() => setToast(null), ms || 1600); }} />
 
         {/* Sign out */}
         <TouchableOpacity testID="settings-signout" style={styles.signOut} onPress={signOutUser}>
