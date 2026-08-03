@@ -1557,10 +1557,14 @@ def _sanitize_upstream_error(raw: Any, platform: str, action: str = "connect") -
         return (f"Couldn't {action} {platform.capitalize()} right now. "
                 "Please try again in a moment.")
     # Known Composio auth-config problems → actionable message.
-    if "invalid auth_config" in clean.lower() or "auth_config_id" in clean.lower():
-        return (f"{platform.capitalize()} isn't set up correctly on our side. "
-                "Please contact support@coolgeek.me.")
-    if "unauthorized" in clean.lower() or "invalid api key" in clean.lower():
+    low_clean = clean.lower()
+    if ("auth_config_notfound" in low_clean
+            or "auth config not found" in low_clean
+            or "invalid auth_config" in low_clean
+            or ("auth_config_id" in low_clean and "not" in low_clean)):
+        return (f"{platform.capitalize()} social connections aren't configured on "
+                "this deploy. Please contact support@coolgeek.me.")
+    if "unauthorized" in low_clean or "invalid api key" in low_clean:
         return (f"{platform.capitalize()} authorization service is temporarily "
                 "unavailable. Please try again shortly.")
     return clean[:240]
